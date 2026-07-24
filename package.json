@@ -1,7 +1,7 @@
 {
   "name": "@53able/pi-agent-browser",
-  "version": "0.1.0",
-  "description": "Pi extension wrapping vercel-labs/agent-browser for browser automation and context extraction.",
+  "version": "0.1.1",
+  "description": "Typed Pi tools for browser automation, rendered-page context extraction, screenshots, and saved session state via agent-browser.",
   "type": "module",
   "license": "MIT",
   "keywords": [

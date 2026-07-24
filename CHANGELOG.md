@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+### Changed
+
+- Reworked README for package users: benefits, workflows, safety guidance, and troubleshooting.
+- Removed maintainer-specific publishing instructions from the npm-facing README.
+
 ## 0.1.0
 
 ### Added

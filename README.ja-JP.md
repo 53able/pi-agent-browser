@@ -1,5 +1,7 @@
 # pi-agent-browser
 
+[English](README.md) | 日本語
+
 `pi-agent-browser` は、Pi から実ブラウザを操作するための typed tools を追加する拡張です。内部では [`agent-browser`](https://github.com/vercel-labs/agent-browser) を使います。
 
 Pi が Web ページを開き、rendered context を抽出し、ログイン状態を保ち、スクリーンショットを証跡として残す必要があるときに使います。raw shell command を毎回組み立てる代わりに、Pi の tool として呼び出せます。
@@ -173,8 +175,8 @@ agent-browser install
 
 package 名の判断、npm Trusted Publishing、semantic-release workflow については、言語別の project history を参照してください。
 
-- [English](project-history.en.md)
-- [日本語](project-history.ja.md)
+- [English](docs/project-history.en.md)
+- [日本語](docs/project-history.ja-JP.md)
 
 ## License
 

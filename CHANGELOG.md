@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Moved the Japanese README to `README.ja-JP.md` and added top-level language switchers.
+- Added a documentation localization policy based on Trendshift repository examples.
+
 ## 0.1.1
 
 ### Changed

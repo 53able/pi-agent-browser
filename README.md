@@ -1,10 +1,10 @@
 # pi-agent-browser
 
+English | [日本語](README.ja-JP.md)
+
 Typed browser automation tools for Pi, powered by [`agent-browser`](https://github.com/vercel-labs/agent-browser).
 
 Use this package when Pi needs to operate real web pages, extract rendered context, keep login sessions, or capture visual evidence without falling back to ad-hoc shell commands.
-
-Documentation in Japanese is available at [`docs/README.ja.md`](docs/README.ja.md).
 
 ## What you get
 
@@ -175,7 +175,7 @@ agent-browser install
 
 ## Project history
 
-If you maintain or contribute to this package, read the project history in [English](docs/project-history.en.md) or [Japanese](docs/project-history.ja.md) for the package-name decision, npm Trusted Publishing setup, and semantic-release workflow.
+If you maintain or contribute to this package, read the project history in [English](docs/project-history.en.md) or [Japanese](docs/project-history.ja-JP.md) for the package-name decision, npm Trusted Publishing setup, and semantic-release workflow.
 
 ## Release automation
 

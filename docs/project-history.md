@@ -4,6 +4,14 @@ This note explains the decisions behind `@53able/pi-agent-browser`: why it was c
 
 It is mainly for maintainers and contributors. If you only want to install and use the package, start with the [README](../README.md).
 
+## 日本語での要約
+
+このパッケージは、Pi から `agent-browser` を使うときの操作を、文字列コマンドではなく型付きツールとして扱えるようにするために作りました。
+
+最初はローカルの Pi 拡張として実装し、動作確認後に OSS パッケージとして切り出しました。既に `pi-agent-browser` という npm パッケージが存在していたため、名前の衝突を避けて `@53able/pi-agent-browser` として公開しています。
+
+リリースは GitHub Actions と npm Trusted Publishing で行います。現在は semantic-release を使っており、`main` に入った Conventional Commits をもとに、必要なときだけ npm publish と GitHub Release が作られます。長期利用する npm token は使いません。
+
 ## The problem we wanted to solve
 
 Pi can already run shell commands, so it can call [`agent-browser`](https://github.com/vercel-labs/agent-browser) directly. That works for quick experiments, but it has a weak interface for repeatable agent work:
@@ -152,3 +160,5 @@ That means the authentication and release plumbing are in place. The next `fix:`
 ```bash
 pi install npm:@53able/pi-agent-browser
 ```
+
+日本語で説明するなら、このパッケージは「Pi にブラウザ操作、ページ抽出、スクリーンショット保存、ログイン状態の再利用を追加する拡張」です。

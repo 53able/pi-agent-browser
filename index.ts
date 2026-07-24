@@ -1,0 +1,523 @@
+import type { ExtensionAPI, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { access, mkdir, writeFile } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import { join, resolve, basename } from "node:path";
+import { spawn } from "node:child_process";
+
+const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_MAX_PREVIEW_CHARS = 12_000;
+const DEFAULT_ARTIFACT_DIR = "outputs/browser";
+
+type JsonObject = Record<string, unknown>;
+
+type RunResult = {
+  ok: boolean;
+  command: string;
+  args: string[];
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  durationMs: number;
+};
+
+type ToolDetails = RunResult & {
+  artifactPaths?: string[];
+  parsedJson?: unknown;
+};
+
+function optionalString(description: string) {
+  return Type.Optional(Type.String({ description }));
+}
+
+function optionalBoolean(description: string) {
+  return Type.Optional(Type.Boolean({ description }));
+}
+
+function optionalStringArray(description: string) {
+  return Type.Optional(Type.Array(Type.String(), { description }));
+}
+
+function commonSchema(extra: JsonObject = {}) {
+  return {
+    session: optionalString("agent-browser session name. Use this to isolate or reuse browser state."),
+    allowedDomains: optionalStringArray("Optional domain allowlist forwarded to --allowed-domains. Example: ['example.com', '*.example.com']."),
+    maxOutput: Type.Optional(Type.Integer({ minimum: 1, description: "Forwarded to --max-output for output containment." })),
+    timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Tool execution timeout in milliseconds." })),
+    extraArgs: optionalStringArray("Advanced raw agent-browser CLI args appended after generated args. Use sparingly."),
+    ...extra,
+  };
+}
+
+const OpenSchema = Type.Object(commonSchema({
+  url: optionalString("URL to open. Omit to launch about:blank."),
+  headed: optionalBoolean("Launch headed browser window when true."),
+  profile: optionalString("Chrome profile path or profile name forwarded to --profile."),
+  restore: Type.Optional(Type.Union([Type.Boolean(), Type.String()], { description: "Enable --restore auto-save/restore, or pass a restore key/path when supported." })),
+}));
+
+const ReadSchema = Type.Object(commonSchema({
+  url: optionalString("URL to fetch/read. Omit to read the active rendered tab DOM."),
+  json: optionalBoolean("Return agent-browser JSON output where supported."),
+  raw: optionalBoolean("Return raw response body for URL reads."),
+  outline: optionalBoolean("Return compact heading outline."),
+  requireMd: optionalBoolean("Fail unless the server returns markdown."),
+  filter: optionalString("Filter text for read extraction, outline, or llms sections."),
+  llms: Type.Optional(Type.Union([Type.Literal("index"), Type.Literal("full")], { description: "Read nearest llms.txt index or llms-full.txt." })),
+  outputPath: optionalString("Optional path to save full stdout. Relative paths resolve from cwd."),
+}));
+
+const SnapshotSchema = Type.Object(commonSchema({
+  outputPath: optionalString("Optional path to save the snapshot stdout. Relative paths resolve from cwd."),
+}));
+
+const ClickSchema = Type.Object(commonSchema({
+  selector: Type.String({ description: "Element ref from snapshot, such as @e2, or a CSS selector." }),
+  newTab: optionalBoolean("Open target in a new tab when supported."),
+}));
+
+const FillSchema = Type.Object(commonSchema({
+  selector: Type.String({ description: "Input ref from snapshot, such as @e3, or a CSS selector." }),
+  text: Type.String({ description: "Text to fill into the element." }),
+}));
+
+const ScreenshotSchema = Type.Object(commonSchema({
+  path: optionalString("Output screenshot path. Relative paths resolve from cwd. If omitted, outputs/browser is used."),
+  full: optionalBoolean("Capture full page."),
+  annotate: optionalBoolean("Annotate screenshot with numbered element labels."),
+  format: Type.Optional(Type.Union([Type.Literal("png"), Type.Literal("jpeg")], { description: "Screenshot format." })),
+  quality: Type.Optional(Type.Integer({ minimum: 0, maximum: 100, description: "JPEG quality 0-100." })),
+}));
+
+const EvalSchema = Type.Object(commonSchema({
+  javascript: Type.String({ description: "JavaScript expression or script passed to agent-browser eval." }),
+  outputPath: optionalString("Optional path to save stdout. Relative paths resolve from cwd."),
+}));
+
+const CloseSchema = Type.Object(commonSchema({
+  all: optionalBoolean("Close all active agent-browser sessions."),
+}));
+
+const StateSchema = Type.Object(commonSchema({
+  operation: Type.Union([
+    Type.Literal("save"),
+    Type.Literal("load"),
+    Type.Literal("list"),
+    Type.Literal("show"),
+    Type.Literal("rename"),
+    Type.Literal("clear"),
+    Type.Literal("clean"),
+  ], { description: "State operation: save/load/list/show/rename/clear/clean." }),
+  path: optionalString("Path for save/load operations."),
+  filename: optionalString("Saved state filename for show."),
+  oldName: optionalString("Old saved state name for rename."),
+  newName: optionalString("New saved state name for rename."),
+  sessionName: optionalString("Session name for clear. Distinct from global session to match agent-browser state clear [session-name]."),
+  all: optionalBoolean("Clear all saved states for operation=clear."),
+  olderThanDays: Type.Optional(Type.Integer({ minimum: 1, description: "Delete saved states older than this many days for operation=clean." })),
+  json: optionalBoolean("Forward --json for machine-readable state output."),
+}));
+
+const DoctorSchema = Type.Object({
+  fix: optionalBoolean("Run agent-browser doctor --fix."),
+  timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Tool execution timeout in milliseconds." })),
+});
+
+async function findAgentBrowserBin(): Promise<string> {
+  if (process.env.AGENT_BROWSER_BIN) return process.env.AGENT_BROWSER_BIN;
+  const candidates = [
+    "/Users/tadano-go/.local/bin/agent-browser",
+    join(process.env.HOME ?? "", ".local/bin/agent-browser"),
+    "agent-browser",
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate === "agent-browser") return candidate;
+    try {
+      await access(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Try next candidate.
+    }
+  }
+  return "agent-browser";
+}
+
+function pushCommonArgs(args: string[], params: JsonObject): void {
+  if (typeof params.session === "string" && params.session.trim()) {
+    args.push("--session", params.session.trim());
+  }
+  if (Array.isArray(params.allowedDomains) && params.allowedDomains.length > 0) {
+    args.push("--allowed-domains", params.allowedDomains.map(String).join(","));
+  }
+  if (typeof params.maxOutput === "number" && Number.isFinite(params.maxOutput)) {
+    args.push("--max-output", String(Math.floor(params.maxOutput)));
+  }
+}
+
+function pushExtraArgs(args: string[], params: JsonObject): void {
+  if (Array.isArray(params.extraArgs)) {
+    for (const arg of params.extraArgs) args.push(String(arg));
+  }
+}
+
+async function runAgentBrowser(args: string[], options: { signal?: AbortSignal; timeoutMs?: number; cwd: string; onUpdate?: AgentToolUpdateCallback<ToolDetails> }): Promise<RunResult> {
+  const command = await findAgentBrowserBin();
+  const started = Date.now();
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+  return await new Promise<RunResult>((resolvePromise) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      signal: options.signal,
+    });
+
+    const timeout = setTimeout(() => {
+      if (!settled) {
+        stderr += `\nTimed out after ${timeoutMs}ms.`;
+        child.kill("SIGTERM");
+      }
+    }, timeoutMs);
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolvePromise({
+        ok: false,
+        command,
+        args,
+        stdout,
+        stderr: stderr + (stderr ? "\n" : "") + error.message,
+        exitCode: null,
+        signal: null,
+        durationMs: Date.now() - started,
+      });
+    });
+    child.on("close", (exitCode, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolvePromise({
+        ok: exitCode === 0,
+        command,
+        args,
+        stdout,
+        stderr,
+        exitCode,
+        signal,
+        durationMs: Date.now() - started,
+      });
+    });
+  });
+}
+
+function resolveOutputPath(ctx: ExtensionContext, requested: unknown, fallbackName: string): string {
+  if (typeof requested === "string" && requested.trim()) {
+    const p = requested.trim();
+    return p.startsWith("/") ? p : resolve(ctx.cwd, p);
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return resolve(ctx.cwd, DEFAULT_ARTIFACT_DIR, `${stamp}-${fallbackName}`);
+}
+
+async function saveArtifact(path: string, content: string): Promise<string> {
+  await mkdir(resolve(path, ".."), { recursive: true });
+  await writeFile(path, content, "utf8");
+  return path;
+}
+
+function preview(text: string, maxChars = DEFAULT_MAX_PREVIEW_CHARS): { text: string; truncated: boolean } {
+  if (text.length <= maxChars) return { text, truncated: false };
+  return { text: text.slice(0, maxChars) + `\n\n[truncated: ${text.length - maxChars} chars omitted]`, truncated: true };
+}
+
+function buildTextResult(result: RunResult, artifactPaths: string[] = [], parsedJson?: unknown): { content: { type: "text"; text: string }[]; details: ToolDetails } {
+  const stdoutPreview = preview(result.stdout.trim());
+  const stderrPreview = preview(result.stderr.trim(), 4000);
+  const lines = [
+    result.ok ? "agent-browser command succeeded." : "agent-browser command failed.",
+    `Command: ${result.command} ${result.args.map((a) => JSON.stringify(a)).join(" ")}`,
+    `Exit: ${result.exitCode ?? "null"}${result.signal ? ` signal=${result.signal}` : ""}`,
+    `Duration: ${result.durationMs}ms`,
+  ];
+  if (artifactPaths.length > 0) {
+    lines.push("Artifacts:");
+    for (const p of artifactPaths) lines.push(`- ${p}`);
+  }
+  if (stdoutPreview.text) {
+    lines.push("Stdout:", stdoutPreview.text);
+  }
+  if (stderrPreview.text) {
+    lines.push("Stderr:", stderrPreview.text);
+  }
+  if (stdoutPreview.truncated) {
+    lines.push("Stdout preview was truncated. Read the artifact path or rerun with outputPath for full output.");
+  }
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+    details: { ...result, artifactPaths, parsedJson },
+  };
+}
+
+function parseJsonIfRequested(result: RunResult, requested: boolean): unknown | undefined {
+  if (!requested || !result.stdout.trim()) return undefined;
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    return undefined;
+  }
+}
+
+export default function agentBrowserExtension(pi: ExtensionAPI) {
+  pi.registerTool({
+    name: "agent_browser_open",
+    label: "Agent Browser Open",
+    description: "Open a URL or launch an agent-browser controlled browser session. Wraps vercel-labs/agent-browser CLI.",
+    promptSnippet: "Use agent_browser_open to launch/navigate browser pages when rendered interaction is needed.",
+    promptGuidelines: [
+      "Use agent_browser_snapshot after opening or navigating before clicking by @ref.",
+      "Pass allowedDomains for untrusted or task-scoped browsing when possible.",
+    ],
+    parameters: OpenSchema,
+    async execute(_id, rawParams, signal, onUpdate, ctx) {
+      const params = rawParams as JsonObject;
+      const args: string[] = [];
+      pushCommonArgs(args, params);
+      if (params.headed === true) args.push("--headed");
+      if (typeof params.profile === "string" && params.profile.trim()) args.push("--profile", params.profile.trim());
+      if (params.restore === true) {
+        args.push("--restore");
+      } else if (typeof params.restore === "string" && params.restore.trim()) {
+        const restore = params.restore.trim();
+        if (restore.toLowerCase() === "true") args.push("--restore");
+        else if (restore.toLowerCase() !== "false") args.push("--restore", restore);
+      }
+      args.push("open");
+      if (typeof params.url === "string" && params.url.trim()) args.push(params.url.trim());
+      pushExtraArgs(args, params);
+      const result = await runAgentBrowser(args, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+      return buildTextResult(result);
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_browser_read",
+    label: "Agent Browser Read",
+    description: "Extract agent-readable text or JSON from a URL or the active rendered tab using agent-browser read.",
+    promptSnippet: "Use agent_browser_read for browser-backed or markdown-aware web context extraction. Save long outputs with outputPath.",
+    promptGuidelines: [
+      "Prefer agent_browser_read over screenshot OCR when text extraction is enough.",
+      "Use outputPath for durable source artifacts when extracted content will support a report.",
+    ],
+    parameters: ReadSchema,
+    async execute(_id, rawParams, signal, onUpdate, ctx) {
+      const params = rawParams as JsonObject;
+      const args: string[] = [];
+      pushCommonArgs(args, params);
+      args.push("read");
+      if (typeof params.url === "string" && params.url.trim()) args.push(params.url.trim());
+      if (params.json === true) args.push("--json");
+      if (params.raw === true) args.push("--raw");
+      if (params.outline === true) args.push("--outline");
+      if (params.requireMd === true) args.push("--require-md");
+      if (typeof params.filter === "string" && params.filter.trim()) args.push("--filter", params.filter.trim());
+      if (params.llms === "index" || params.llms === "full") args.push("--llms", params.llms);
+      pushExtraArgs(args, params);
+      const result = await runAgentBrowser(args, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+      const artifacts: string[] = [];
+      if (typeof params.outputPath === "string" && params.outputPath.trim()) {
+        artifacts.push(await saveArtifact(resolveOutputPath(ctx, params.outputPath, "read.txt"), result.stdout));
+      }
+      return buildTextResult(result, artifacts, parseJsonIfRequested(result, params.json === true));
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_browser_snapshot",
+    label: "Agent Browser Snapshot",
+    description: "Get an accessibility snapshot with stable refs for browser interaction.",
+    promptSnippet: "Use agent_browser_snapshot before clicks/fills to get fresh @refs.",
+    promptGuidelines: ["Refs can go stale after navigation or DOM changes. Take a fresh snapshot before retrying failed clicks."],
+    parameters: SnapshotSchema,
+    async execute(_id, rawParams, signal, onUpdate, ctx) {
+      const params = rawParams as JsonObject;
+      const args: string[] = [];
+      pushCommonArgs(args, params);
+      args.push("snapshot");
+      pushExtraArgs(args, params);
+      const result = await runAgentBrowser(args, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+      const artifacts: string[] = [];
+      if (typeof params.outputPath === "string" && params.outputPath.trim()) {
+        artifacts.push(await saveArtifact(resolveOutputPath(ctx, params.outputPath, "snapshot.txt"), result.stdout));
+      }
+      return buildTextResult(result, artifacts);
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_browser_click",
+    label: "Agent Browser Click",
+    description: "Click an element by agent-browser @ref or CSS selector.",
+    promptSnippet: "Use agent_browser_click with @refs from agent_browser_snapshot or CSS selectors.",
+    promptGuidelines: ["If a click fails because an element covers the target, inspect the error, dismiss the covering element, and take a fresh snapshot."],
+    parameters: ClickSchema,
+    async execute(_id, rawParams, signal, onUpdate, ctx) {
+      const params = rawParams as JsonObject;
+      const args: string[] = [];
+      pushCommonArgs(args, params);
+      args.push("click", String(params.selector));
+      if (params.newTab === true) args.push("--new-tab");
+      pushExtraArgs(args, params);
+      const result = await runAgentBrowser(args, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+      return buildTextResult(result);
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_browser_fill",
+    label: "Agent Browser Fill",
+    description: "Clear and fill an input element by agent-browser @ref or CSS selector.",
+    promptSnippet: "Use agent_browser_fill for form inputs after identifying refs with agent_browser_snapshot.",
+    parameters: FillSchema,
+    async execute(_id, rawParams, signal, onUpdate, ctx) {
+      const params = rawParams as JsonObject;
+      const args: string[] = [];
+      pushCommonArgs(args, params);
+      args.push("fill", String(params.selector), String(params.text));
+      pushExtraArgs(args, params);
+      const result = await runAgentBrowser(args, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+      return buildTextResult(result);
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_browser_screenshot",
+    label: "Agent Browser Screenshot",
+    description: "Capture a browser screenshot and return the saved artifact path.",
+    promptSnippet: "Use agent_browser_screenshot for visual evidence, UI QA, or pages where text extraction is insufficient.",
+    parameters: ScreenshotSchema,
+    async execute(_id, rawParams, signal, onUpdate, ctx) {
+      const params = rawParams as JsonObject;
+      const path = resolveOutputPath(ctx, params.path, "screenshot.png");
+      await mkdir(resolve(path, ".."), { recursive: true });
+      const args: string[] = [];
+      pushCommonArgs(args, params);
+      args.push("screenshot", path);
+      if (params.full === true) args.push("--full");
+      if (params.annotate === true) args.push("--annotate");
+      if (params.format === "png" || params.format === "jpeg") args.push("--screenshot-format", params.format);
+      if (typeof params.quality === "number" && Number.isFinite(params.quality)) args.push("--screenshot-quality", String(Math.floor(params.quality)));
+      pushExtraArgs(args, params);
+      const result = await runAgentBrowser(args, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+      const artifacts = existsSync(path) ? [path] : [];
+      return buildTextResult(result, artifacts);
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_browser_eval",
+    label: "Agent Browser Eval",
+    description: "Evaluate JavaScript in the active browser tab via agent-browser eval.",
+    promptSnippet: "Use agent_browser_eval for precise DOM extraction or browser-side state checks when read/snapshot are insufficient.",
+    promptGuidelines: ["Do not use eval to bypass site security or perform destructive actions. Prefer read/snapshot for ordinary extraction."],
+    parameters: EvalSchema,
+    async execute(_id, rawParams, signal, onUpdate, ctx) {
+      const params = rawParams as JsonObject;
+      const args: string[] = [];
+      pushCommonArgs(args, params);
+      args.push("eval", String(params.javascript));
+      pushExtraArgs(args, params);
+      const result = await runAgentBrowser(args, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+      const artifacts: string[] = [];
+      if (typeof params.outputPath === "string" && params.outputPath.trim()) {
+        artifacts.push(await saveArtifact(resolveOutputPath(ctx, params.outputPath, "eval.txt"), result.stdout));
+      }
+      return buildTextResult(result, artifacts);
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_browser_state",
+    label: "Agent Browser State",
+    description: "Save, load, list, show, rename, clear, or clean agent-browser saved state such as cookies and web storage.",
+    promptSnippet: "Use agent_browser_state to persist or clear login/browser state when sessions and restore are involved.",
+    promptGuidelines: [
+      "Use operation=list before destructive clear/clean operations unless the user explicitly asks to clear everything.",
+      "Use session + restore on agent_browser_open for automatic state persistence; use state save/load for explicit files.",
+      "Do not clear all saved states unless the user clearly asks for global cleanup.",
+    ],
+    parameters: StateSchema,
+    async execute(_id, rawParams, signal, onUpdate, ctx) {
+      const params = rawParams as JsonObject;
+      const args: string[] = [];
+      pushCommonArgs(args, params);
+      if (params.json === true) args.push("--json");
+      args.push("state");
+      const operation = String(params.operation);
+      args.push(operation);
+
+      if ((operation === "save" || operation === "load") && typeof params.path === "string" && params.path.trim()) {
+        args.push(params.path.trim());
+      } else if (operation === "show" && typeof params.filename === "string" && params.filename.trim()) {
+        args.push(params.filename.trim());
+      } else if (operation === "rename" && typeof params.oldName === "string" && typeof params.newName === "string" && params.oldName.trim() && params.newName.trim()) {
+        args.push(params.oldName.trim(), params.newName.trim());
+      } else if (operation === "clear") {
+        if (typeof params.sessionName === "string" && params.sessionName.trim()) args.push(params.sessionName.trim());
+        if (params.all === true) args.push("--all");
+      } else if (operation === "clean" && typeof params.olderThanDays === "number" && Number.isFinite(params.olderThanDays)) {
+        args.push("--older-than", String(Math.floor(params.olderThanDays)));
+      }
+
+      pushExtraArgs(args, params);
+      const result = await runAgentBrowser(args, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+      return buildTextResult(result, [], parseJsonIfRequested(result, params.json === true));
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_browser_close",
+    label: "Agent Browser Close",
+    description: "Close the active agent-browser session or all sessions.",
+    promptSnippet: "Use agent_browser_close to clean up browser sessions after automation.",
+    parameters: CloseSchema,
+    async execute(_id, rawParams, signal, onUpdate, ctx) {
+      const params = rawParams as JsonObject;
+      const args: string[] = [];
+      pushCommonArgs(args, params);
+      args.push("close");
+      if (params.all === true) args.push("--all");
+      pushExtraArgs(args, params);
+      const result = await runAgentBrowser(args, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+      return buildTextResult(result);
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_browser_doctor",
+    label: "Agent Browser Doctor",
+    description: "Run agent-browser doctor to verify installation, Chrome, daemon, security, providers, network, and launch tests.",
+    promptSnippet: "Use agent_browser_doctor when browser automation fails or before relying on agent-browser in a workflow.",
+    parameters: DoctorSchema,
+    async execute(_id, rawParams, signal, onUpdate, ctx) {
+      const params = rawParams as JsonObject;
+      const args = ["doctor"];
+      if (params.fix === true) args.push("--fix");
+      const result = await runAgentBrowser(args, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+      return buildTextResult(result);
+    },
+  });
+}

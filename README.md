@@ -24,6 +24,12 @@ export AGENT_BROWSER_BIN=/absolute/path/to/agent-browser
 
 ## Installation
 
+From GitHub:
+
+```bash
+pi install https://github.com/53able/pi-agent-browser
+```
+
 From npm after publish:
 
 ```bash
@@ -33,7 +39,7 @@ pi install npm:pi-agent-browser
 From a local checkout:
 
 ```bash
-git clone https://github.com/tadano-go/pi-agent-browser.git
+git clone https://github.com/53able/pi-agent-browser.git
 pi install ./pi-agent-browser
 ```
 
@@ -41,7 +47,7 @@ Or add the package source to Pi settings manually:
 
 ```json
 {
-  "packages": ["npm:pi-agent-browser"]
+  "packages": ["https://github.com/53able/pi-agent-browser"]
 }
 ```
 

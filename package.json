@@ -13,13 +13,13 @@
     "web-automation",
     "context-extraction"
   ],
-  "homepage": "https://github.com/tadano-go/pi-agent-browser#readme",
+  "homepage": "https://github.com/53able/pi-agent-browser#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tadano-go/pi-agent-browser.git"
+    "url": "git+https://github.com/53able/pi-agent-browser.git"
   },
   "bugs": {
-    "url": "https://github.com/tadano-go/pi-agent-browser/issues"
+    "url": "https://github.com/53able/pi-agent-browser/issues"
   },
   "files": [
     "index.ts",

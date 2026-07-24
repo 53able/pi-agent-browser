@@ -4,17 +4,7 @@ Typed browser automation tools for Pi, powered by [`agent-browser`](https://gith
 
 Use this package when Pi needs to operate real web pages, extract rendered context, keep login sessions, or capture visual evidence without falling back to ad-hoc shell commands.
 
-## 日本語での要点
-
-`@53able/pi-agent-browser` は、Pi から実ブラウザを扱うための拡張です。`agent-browser` CLI をそのまま文字列で呼ぶのではなく、`agent_browser_read` や `agent_browser_click` のような型付きツールとして使えるようにします。
-
-次のような場面で役立ちます。
-
-- ログイン後の画面から本文や状態を読み取りたい
-- ボタンや入力欄を `@ref` で安全に操作したい
-- 調査やレビューの根拠としてスクリーンショットを残したい
-- 同じブラウザセッションやログイン状態を次回も使いたい
-- `allowedDomains` や `maxOutput` でブラウザ操作の範囲を絞りたい
+Documentation in Japanese is available at [`docs/README.ja.md`](docs/README.ja.md).
 
 ## What you get
 
@@ -85,12 +75,6 @@ Ask Pi:
 
 ```text
 Read https://example.com through the browser and save the extracted text to outputs/browser/example.md.
-```
-
-日本語でもそのまま依頼できます。
-
-```text
-https://example.com をブラウザ経由で読み、outputs/browser/example.md に保存して
 ```
 
 Equivalent `agent_browser_read` arguments:
@@ -191,7 +175,7 @@ agent-browser install
 
 ## Project history
 
-If you maintain or contribute to this package, read [`docs/project-history.md`](docs/project-history.md) for the package-name decision, npm Trusted Publishing setup, and semantic-release workflow. The history document is written mainly in English and includes a Japanese summary for Japanese-speaking maintainers.
+If you maintain or contribute to this package, read the project history in [English](docs/project-history.en.md) or [Japanese](docs/project-history.ja.md) for the package-name decision, npm Trusted Publishing setup, and semantic-release workflow.
 
 ## Release automation
 

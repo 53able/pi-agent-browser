@@ -24,6 +24,7 @@
   "files": [
     "index.ts",
     "skills",
+    "docs",
     "README.md",
     "LICENSE",
     "CHANGELOG.md",

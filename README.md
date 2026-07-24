@@ -171,6 +171,10 @@ npm install -g agent-browser
 agent-browser install
 ```
 
+## Project history
+
+For the extraction story, package-name decision, npm Trusted Publisher setup, and semantic-release workflow, see [`docs/project-history.md`](docs/project-history.md).
+
 ## Release automation
 
 Releases are automated with semantic-release. Maintainers merge Conventional Commits into `main`; GitHub Actions runs `npx semantic-release@25`, determines the next version, publishes to npm through Trusted Publishing, creates the Git tag, and writes the GitHub Release.

@@ -173,7 +173,7 @@ agent-browser install
 
 ## Project history
 
-For the extraction story, package-name decision, npm Trusted Publisher setup, and semantic-release workflow, see [`docs/project-history.md`](docs/project-history.md).
+If you maintain or contribute to this package, read [`docs/project-history.md`](docs/project-history.md) for the package-name decision, npm Trusted Publishing setup, and semantic-release workflow.
 
 ## Release automation
 

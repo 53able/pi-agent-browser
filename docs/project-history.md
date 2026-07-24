@@ -1,55 +1,71 @@
-# Project history and release setup
+# Why this package exists
 
-This document records why this package exists, how the npm/GitHub setup was chosen, and how releases now work.
+This note explains the decisions behind `@53able/pi-agent-browser`: why it was created, why it uses a scoped npm name, and how releases are automated.
 
-## Background
+It is mainly for maintainers and contributors. If you only want to install and use the package, start with the [README](../README.md).
 
-The project started as a local Pi extension that wraps [`vercel-labs/agent-browser`](https://github.com/vercel-labs/agent-browser). The goal was to make browser automation feel native inside Pi instead of asking agents to compose raw shell commands.
+## The problem we wanted to solve
 
-The first implementation exposed typed tools such as `agent_browser_open`, `agent_browser_read`, `agent_browser_snapshot`, `agent_browser_click`, `agent_browser_fill`, `agent_browser_screenshot`, `agent_browser_eval`, `agent_browser_state`, `agent_browser_close`, and `agent_browser_doctor`.
+Pi can already run shell commands, so it can call [`agent-browser`](https://github.com/vercel-labs/agent-browser) directly. That works for quick experiments, but it has a weak interface for repeatable agent work:
 
-The local extension was then extracted into an OSS package so other Pi users could install it.
+- every browser action is a shell string
+- outputs are not consistently shaped
+- saved screenshots and extracted text are easy to lose
+- login/session state needs manual handling
+- safety options such as `allowedDomains` are easy to forget
 
-## Package name decision
+The extension began as a local wrapper around `agent-browser` to solve those issues. The goal was not to replace `agent-browser`; it was to make its browser capabilities feel native inside Pi.
 
-The unscoped npm package name `pi-agent-browser` was already taken by an existing package:
+## What was extracted
 
-- npm: https://www.npmjs.com/package/pi-agent-browser
-- repository metadata: `github.com/coctostan/pi-agent-browser`
+The local extension exposed browser actions as typed Pi tools:
 
-That package and this package have a similar broad purpose: both wrap `agent-browser` for Pi. The implementation approach differs:
+- `agent_browser_open`
+- `agent_browser_read`
+- `agent_browser_snapshot`
+- `agent_browser_click`
+- `agent_browser_fill`
+- `agent_browser_screenshot`
+- `agent_browser_eval`
+- `agent_browser_state`
+- `agent_browser_close`
+- `agent_browser_doctor`
 
-- Existing `pi-agent-browser`: exposes one generic `browser` tool that accepts an `agent-browser` command string.
-- This package: exposes multiple typed `agent_browser_*` tools with structured schemas, saved artifacts, session/state controls, and safer defaults.
+This made each action explicit. Pi can see the expected arguments, return artifact paths, preserve session names, and guide the model toward safer browsing patterns.
 
-To avoid name collision and make ownership clear, this package is published as:
+Once the local version worked, it was moved into a standalone repository so other Pi users could install it.
 
-```text
-@53able/pi-agent-browser
-```
-
-## Repository setup
-
-The package was extracted to a standalone repository:
+Repository:
 
 ```text
 https://github.com/53able/pi-agent-browser
 ```
 
-Initial OSS files added:
+## Why the package is scoped
 
-- `index.ts` — Pi extension implementation
-- `skills/agent-browser/SKILL.md` — companion skill guidance
-- `package.json` — npm and Pi package metadata
-- `README.md` — user-facing installation and usage guide
-- `LICENSE` — MIT
-- `CHANGELOG.md`
-- `.github/workflows/publish.yml`
-- `release.config.cjs`
+The unscoped npm name `pi-agent-browser` was already taken:
 
-## npm publish and Trusted Publishing
+- npm: https://www.npmjs.com/package/pi-agent-browser
+- repository metadata: `github.com/coctostan/pi-agent-browser`
 
-The package was first published to npm as:
+That package has a similar goal, but a different interface. It exposes one generic `browser` tool that accepts an `agent-browser` command string.
+
+This package uses multiple typed tools instead. The tradeoff is intentional:
+
+| Package | Interface | Best fit |
+| --- | --- | --- |
+| `pi-agent-browser` | One free-form `browser` command string | Flexible CLI-style control |
+| `@53able/pi-agent-browser` | Separate typed `agent_browser_*` tools | Structured Pi workflows, saved artifacts, session/state handling |
+
+To avoid confusion and make ownership clear, this package is published as:
+
+```text
+@53able/pi-agent-browser
+```
+
+## npm and Trusted Publishing setup
+
+The first npm release created the package:
 
 ```text
 @53able/pi-agent-browser@0.1.0
@@ -63,39 +79,41 @@ After the package existed on npm, Trusted Publisher was configured for GitHub Ac
 - Workflow filename: `publish.yml`
 - Allowed action: `npm publish`
 
-This lets GitHub Actions publish through npm OIDC without a long-lived `NPM_TOKEN`.
+This lets GitHub Actions publish through npm OIDC. The repository does not need a long-lived `NPM_TOKEN` secret for publishing.
 
-## README correction
+## README cleanup
 
-The first npm README included maintainer-focused content such as development commands and Trusted Publisher setup. That was not ideal for package users. The README was rewritten to focus on user benefits and practical workflows:
+The first npm README mixed user-facing instructions with maintainer details such as publishing setup. That made the package page less useful for people deciding whether to install it.
+
+The README was revised to lead with user value:
 
 - rendered-page context extraction
-- reliable interaction handles with `@ref`
+- stable `@ref` handles for interaction
 - screenshot and artifact capture
-- session persistence
+- persistent browser sessions
 - safer browsing controls
-- typed Pi tools
+- typed Pi tools instead of raw command strings
 
-This user-focused README was released as `0.1.1`.
+That user-focused README was released as `0.1.1`.
 
-## Release automation
+## Current release workflow
 
-The project now uses [`semantic-release`](https://github.com/semantic-release/semantic-release) from GitHub Actions.
+Releases now run through [`semantic-release`](https://github.com/semantic-release/semantic-release).
 
-Current release behavior:
+The current flow is:
 
-- pushes to `main` run `.github/workflows/publish.yml`
-- the workflow runs `npx semantic-release@25`
-- semantic-release reads Conventional Commit messages since the latest release tag
-- if a release is needed, it determines the next version, publishes to npm, creates a Git tag, and creates a GitHub Release
-- npm publish uses Trusted Publishing / OIDC
-- no `NPM_TOKEN` secret is required
+1. A maintainer merges commits into `main`.
+2. GitHub Actions runs `.github/workflows/publish.yml`.
+3. The workflow runs `npx semantic-release@25`.
+4. semantic-release reads commits since the latest release tag.
+5. If a release is needed, semantic-release chooses the next version, publishes to npm, creates the Git tag, and creates a GitHub Release.
+6. npm publish uses Trusted Publishing / OIDC.
 
-The workflow intentionally avoids `actions/setup-node` `registry-url` so semantic-release and npm OIDC authentication are not disrupted by an auto-generated `.npmrc`.
+The workflow deliberately avoids `actions/setup-node`'s `registry-url` option. That option can create an `.npmrc` that interferes with semantic-release's npm authentication flow.
 
-## Commit conventions
+## Commit messages drive releases
 
-Use Conventional Commits on `main`:
+Use Conventional Commits on `main`.
 
 ```text
 fix: handle empty snapshot output
@@ -115,11 +133,11 @@ feat!: rename browser state arguments
 
 Creates a major release.
 
-A commit with only `docs:`, `ci:`, `chore:`, or other non-release types may run the workflow but should not publish a new npm version.
+A commit such as `docs: ...`, `ci: ...`, or `chore: ...` can still run the workflow, but it should not publish a new npm version.
 
-## Verification already performed
+## Release workflow check
 
-The release workflow was run after the semantic-release migration. It completed successfully and semantic-release reported:
+After the semantic-release migration, the workflow ran successfully. semantic-release reported that npm OIDC authentication worked and that no release was needed for the `ci:` commit:
 
 ```text
 OIDC token exchange with the npm registry succeeded
@@ -127,11 +145,9 @@ Found git tag v0.1.1 associated with version 0.1.1
 There are no relevant changes, so no new version is released.
 ```
 
-This means the CI authentication path is working. The test commit was `ci: automate releases with semantic-release`, so no new package version was expected.
+That means the authentication and release plumbing are in place. The next `fix:`, `feat:`, or breaking-change commit on `main` should produce the corresponding npm release.
 
-## Current install command
-
-Users should install the package with:
+## User install command
 
 ```bash
 pi install npm:@53able/pi-agent-browser

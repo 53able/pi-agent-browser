@@ -171,6 +171,18 @@ npm install -g agent-browser
 agent-browser install
 ```
 
+## Release automation
+
+Releases are automated with semantic-release. Maintainers merge Conventional Commits into `main`; GitHub Actions runs `npx semantic-release@25`, determines the next version, publishes to npm through Trusted Publishing, creates the Git tag, and writes the GitHub Release.
+
+Commit message examples:
+
+- `fix: handle empty snapshot output` → patch release
+- `feat: add browser state export tool` → minor release
+- `feat!: rename tool arguments` or `BREAKING CHANGE:` → major release
+
+The npm Trusted Publisher should continue to point at `.github/workflows/publish.yml`. No long-lived `NPM_TOKEN` is required.
+
 ## License
 
 MIT

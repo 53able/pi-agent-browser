@@ -33,7 +33,7 @@ pi install https://github.com/53able/pi-agent-browser
 From npm after publish:
 
 ```bash
-pi install npm:pi-agent-browser
+pi install npm:@53able/pi-agent-browser
 ```
 
 From a local checkout:
@@ -47,7 +47,7 @@ Or add the package source to Pi settings manually:
 
 ```json
 {
-  "packages": ["https://github.com/53able/pi-agent-browser"]
+  "packages": ["npm:@53able/pi-agent-browser"]
 }
 ```
 
@@ -165,3 +165,27 @@ PI_OFFLINE=1 pi --no-builtin-tools --tools agent_browser_doctor -p "Use agent_br
 ## License
 
 MIT
+
+## Publishing
+
+This repository is intended to publish through npm Trusted Publishing from GitHub Actions, not through long-lived npm tokens.
+
+### npm Trusted Publisher setup
+
+In npm, configure a trusted publisher for the package:
+
+- Package: `@53able/pi-agent-browser`
+- Publisher type: GitHub Actions
+- GitHub owner: `53able`
+- Repository: `pi-agent-browser`
+- Workflow filename: `publish.yml`
+- Allowed action: `npm publish`
+
+Then publish a release by pushing a semver tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow uses GitHub OIDC with `id-token: write`, so no `NPM_TOKEN` secret is required.

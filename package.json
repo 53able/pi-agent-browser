@@ -1,5 +1,5 @@
 {
-  "name": "pi-agent-browser",
+  "name": "@53able/pi-agent-browser",
   "version": "0.1.0",
   "description": "Pi extension wrapping vercel-labs/agent-browser for browser automation and context extraction.",
   "type": "module",

@@ -167,6 +167,8 @@ https://example.com をブラウザ経由で読み、outputs/browser/example.md 
 
 どちらのツールも対話的なセッション（TUI、またはUI対応のRPC）を必要とします。無人・headless実行では、黙って進めるのではなく拒否します。
 
+`agent_browser_open`は、各セッションが`headed: true`で起動されたかどうかも記録します。`agent_browser_handoff`が、headedで開かれていないセッションに対して呼ばれた場合、人間への警告に加えて、可視ウィンドウを開き直すための`agent_browser_open`の引数（セッション名、`headed: true`、`restore: true`、最後に開いていたURL）をそのまま提示します — どのコマンドを打ち直せばよいか推測する必要はありません。ログインや2FA、CAPTCHA、本人確認に差し掛かる可能性があるタスクでは、最初から`headed: true`で開くことを推奨します。一部の確認チャレンジは使い切り・期限付きのため、途中で開き直すとログインからやり直しになることがあります。
+
 ## Troubleshooting
 
 ```bash

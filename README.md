@@ -167,6 +167,8 @@ Not every step should run unattended. Two tools hand control back to a human at 
 
 Both tools require an interactive session (TUI or RPC with UI support); in headless/unattended runs they refuse rather than proceed silently.
 
+`agent_browser_open` also remembers whether each named session was launched with `headed: true`. If `agent_browser_handoff` is called for a session that was not opened headed, it automatically warns the human and includes the exact `agent_browser_open` arguments (session name, `headed: true`, `restore: true`, and the last known URL) needed to reopen a visible window — no more guessing which command to rerun. Prefer `headed: true` up front for any task that might hit a login, 2FA, CAPTCHA, or identity-verification step, since some challenges are single-use and reopening mid-flow may require restarting the login.
+
 ## Troubleshooting
 
 Run:

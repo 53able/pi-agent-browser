@@ -1,6 +1,6 @@
 import type { ExtensionAPI, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { constants, existsSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { spawn } from "node:child_process";
@@ -33,6 +33,51 @@ function scanForSensitiveContent(text: string): string[] {
     if (pattern.test(text)) hits.push(label);
   }
   return hits;
+}
+
+// Tracks whether each agent-browser session was last opened headed, so
+// agent_browser_handoff / agent_browser_commit can tell a human definitively
+// whether a visible browser window exists for them to act in, instead of guessing.
+const SESSION_STATE_DIR = ".pi-agent-browser";
+const SESSION_STATE_FILE = "sessions.json";
+const DEFAULT_SESSION_KEY = "__default__";
+
+type SessionState = { headed: boolean; lastUrl?: string; updatedAt: string };
+
+function sessionKey(params: JsonObject): string {
+  return typeof params.session === "string" && params.session.trim() ? params.session.trim() : DEFAULT_SESSION_KEY;
+}
+
+async function readSessionStates(cwd: string): Promise<Record<string, SessionState>> {
+  try {
+    const raw = await readFile(join(cwd, SESSION_STATE_DIR, SESSION_STATE_FILE), "utf8");
+    return JSON.parse(raw) as Record<string, SessionState>;
+  } catch {
+    return {};
+  }
+}
+
+async function writeSessionState(cwd: string, session: string, patch: Partial<Omit<SessionState, "updatedAt">>): Promise<void> {
+  const dir = join(cwd, SESSION_STATE_DIR);
+  await mkdir(dir, { recursive: true });
+  const states = await readSessionStates(cwd);
+  const previous = states[session];
+  states[session] = {
+    headed: patch.headed ?? previous?.headed ?? false,
+    lastUrl: patch.lastUrl ?? previous?.lastUrl,
+    updatedAt: new Date().toISOString(),
+  };
+  await writeFile(join(dir, SESSION_STATE_FILE), JSON.stringify(states, null, 2), "utf8");
+}
+
+function reopenHeadedGuidance(session: string, lastUrl: string | undefined): string[] {
+  const sessionArg = session === DEFAULT_SESSION_KEY ? {} : { session };
+  const reopenArgs = JSON.stringify({ ...sessionArg, headed: true, restore: true, ...(lastUrl ? { url: lastUrl } : {}) });
+  return [
+    `⚠ このセッション(${session === DEFAULT_SESSION_KEY ? "既定セッション" : session})はheadless(ウィンドウ非表示)で開かれています。`,
+    `人間が直接操作できるようにするには、agent_browser_open を次の引数で呼び直してください: ${reopenArgs}`,
+    "同じセッション名なのでcookie等は復元されますが、2FA/CAPTCHAなど使い切り・期限付きのチャレンジは、再度最初からやり直しになる場合があります。",
+  ];
 }
 
 type JsonObject = Record<string, unknown>;
@@ -346,6 +391,7 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
     promptGuidelines: [
       "Use agent_browser_snapshot after opening or navigating before clicking by @ref.",
       "Pass allowedDomains for untrusted or task-scoped browsing when possible.",
+      "Prefer headed: true whenever the task might hit a login, 2FA, CAPTCHA, or identity-verification step — a human can only intervene through agent_browser_handoff if a visible window already exists.",
     ],
     parameters: OpenSchema,
     async execute(_id, rawParams, signal, onUpdate, ctx) {
@@ -365,6 +411,12 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
       if (typeof params.url === "string" && params.url.trim()) args.push(params.url.trim());
       pushExtraArgs(args, params);
       const result = await runAgentBrowser(args, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+      if (result.ok) {
+        await writeSessionState(ctx.cwd, sessionKey(params), {
+          headed: params.headed === true,
+          lastUrl: typeof params.url === "string" && params.url.trim() ? params.url.trim() : undefined,
+        });
+      }
       return buildTextResult(result);
     },
   });
@@ -582,6 +634,9 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
       const category = String(params.category);
       const reason = String(params.reason);
       const artifacts: string[] = [];
+      const session = sessionKey(params);
+      const sessionState = (await readSessionStates(ctx.cwd))[session];
+      const headlessNotes = sessionState?.headed === true ? [] : reopenHeadedGuidance(session, sessionState?.lastUrl);
 
       if (params.screenshot !== false) {
         const path = resolveOutputPath(ctx, undefined, "handoff.png");
@@ -601,6 +656,7 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
               `Human handoff required (${category}) but no interactive UI is available in this run mode.`,
               `Reason: ${reason}`,
               artifacts.length ? `Evidence: ${artifacts.join(", ")}` : undefined,
+              ...headlessNotes,
               "Stop this task now and ask the operator to rerun it interactively so the handoff can be completed.",
             ].filter(Boolean).join("\n"),
           }],
@@ -609,8 +665,9 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
         };
       }
 
+      if (headlessNotes.length) ctx.ui.notify(headlessNotes.join(" "), "warning");
       ctx.ui.notify(`Human handoff needed (${category}): ${reason}`, "warning");
-      ctx.ui.setStatus("agent-browser-handoff", `⏸ Waiting for human: ${reason}`);
+      ctx.ui.setStatus("agent-browser-handoff", headlessNotes.length ? `⏸ ブラウザ非表示 — ${reason}` : `⏸ Waiting for human: ${reason}`);
       let choice: string | undefined;
       try {
         choice = await ctx.ui.select(
@@ -626,6 +683,7 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
         content: [{
           type: "text",
           text: [
+            ...headlessNotes,
             resumed
               ? "Human confirmed the handoff step is complete. Take a fresh agent_browser_snapshot before continuing."
               : "Human aborted the task during handoff. Stop and report back; do not retry automatically.",

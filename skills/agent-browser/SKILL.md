@@ -36,6 +36,10 @@ Two tools exist so the agent stops and hands control back to a human instead of 
 
 `agent_browser_read` and `agent_browser_snapshot` also run a lightweight heuristic scan for 2FA/CAPTCHA/identity-verification keywords and prepend a warning to their output when detected — treat that warning as a signal to call `agent_browser_handoff` next, not as a blocker by itself.
 
+### If the human can't find the browser window
+
+`agent_browser_open` records whether each named session was launched with `headed: true`. When `agent_browser_handoff` runs for a session that was not opened headed, it automatically prepends a warning naming the session and the exact `agent_browser_open` arguments (including the last known URL) needed to reopen it visibly, instead of leaving the human to guess. Prefer `headed: true` from the start for any task that might hit a login, 2FA, CAPTCHA, or identity-verification step — a human can only intervene through `agent_browser_handoff` if a visible window already exists. Note that some verification challenges are single-use or session-bound, so reopening may require restarting the login flow rather than resuming mid-challenge.
+
 ## Common examples
 
 Read a public page:

@@ -9,6 +9,32 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_PREVIEW_CHARS = 12_000;
 const DEFAULT_ARTIFACT_DIR = "outputs/browser";
 
+// Heuristics for content that signals a human-only checkpoint (2FA, CAPTCHA, identity
+// verification). These are advisory only — read/snapshot stay non-destructive, so we
+// annotate the result instead of blocking. Actual pausing happens in agent_browser_handoff.
+const SENSITIVE_CONTENT_PATTERNS: { label: string; pattern: RegExp }[] = [
+  {
+    label: "2FA / one-time code",
+    pattern: /\b(two[-\s]?factor|2fa|one[-\s]?time (?:code|password)|otp|verification code)\b|認証コード|二段階認証|二要素認証|ワンタイムパスワード/i,
+  },
+  {
+    label: "CAPTCHA",
+    pattern: /\b(captcha|recaptcha|hcaptcha|prove you.?re (?:not a robot|human)|are you a robot)\b|画像認証|パズル認証/i,
+  },
+  {
+    label: "identity verification",
+    pattern: /\bverify your identity\b|\bidentity verification\b|\bconfirm it.?s you\b|本人確認|身分証明/i,
+  },
+];
+
+function scanForSensitiveContent(text: string): string[] {
+  const hits: string[] = [];
+  for (const { label, pattern } of SENSITIVE_CONTENT_PATTERNS) {
+    if (pattern.test(text)) hits.push(label);
+  }
+  return hits;
+}
+
 type JsonObject = Record<string, unknown>;
 
 type RunResult = {
@@ -25,6 +51,7 @@ type RunResult = {
 type ToolDetails = RunResult & {
   artifactPaths?: string[];
   parsedJson?: unknown;
+  securityFlags?: string[];
 };
 
 function optionalString(description: string) {
@@ -117,6 +144,25 @@ const StateSchema = Type.Object(commonSchema({
   all: optionalBoolean("Clear all saved states for operation=clear."),
   olderThanDays: Type.Optional(Type.Integer({ minimum: 1, description: "Delete saved states older than this many days for operation=clean." })),
   json: optionalBoolean("Forward --json for machine-readable state output."),
+}));
+
+const HandoffSchema = Type.Object(commonSchema({
+  category: Type.Union(
+    [Type.Literal("2fa"), Type.Literal("captcha"), Type.Literal("identity_verification"), Type.Literal("other")],
+    { description: "Why AI control must pause: 2fa, captcha, identity_verification, or other." },
+  ),
+  reason: Type.String({ description: "Concise description of what the human must do (e.g. 'Enter the SMS code sent to the user\\'s phone')." }),
+  screenshot: optionalBoolean("Capture a screenshot for the human before waiting. Defaults to true."),
+}));
+
+const CommitSchema = Type.Object(commonSchema({
+  selector: Type.String({ description: "Element ref from snapshot, such as @e2, or a CSS selector, for the irreversible action (e.g. final pay/post/delete button)." }),
+  summary: Type.String({ description: "Plain-language description of what this click will do, e.g. '¥12,000 の決済を確定する' or 'この投稿を完全に削除する'." }),
+  riskCategory: Type.Union(
+    [Type.Literal("payment"), Type.Literal("delete"), Type.Literal("post_publish"), Type.Literal("send"), Type.Literal("other")],
+    { description: "Category of irreversible action: payment, delete, post_publish, send, or other." },
+  ),
+  screenshot: optionalBoolean("Capture a screenshot as evidence before asking for confirmation. Defaults to true."),
 }));
 
 const DoctorSchema = Type.Object({
@@ -244,10 +290,11 @@ function preview(text: string, maxChars = DEFAULT_MAX_PREVIEW_CHARS): { text: st
   return { text: text.slice(0, maxChars) + `\n\n[truncated: ${text.length - maxChars} chars omitted]`, truncated: true };
 }
 
-function buildTextResult(result: RunResult, artifactPaths: string[] = [], parsedJson?: unknown): { content: { type: "text"; text: string }[]; details: ToolDetails } {
+function buildTextResult(result: RunResult, artifactPaths: string[] = [], parsedJson?: unknown, notes: string[] = []): { content: { type: "text"; text: string }[]; details: ToolDetails } {
   const stdoutPreview = preview(result.stdout.trim());
   const stderrPreview = preview(result.stderr.trim(), 4000);
   const lines = [
+    ...notes,
     result.ok ? "agent-browser command succeeded." : "agent-browser command failed.",
     `Command: ${result.command} ${result.args.map((a) => JSON.stringify(a)).join(" ")}`,
     `Exit: ${result.exitCode ?? "null"}${result.signal ? ` signal=${result.signal}` : ""}`,
@@ -270,6 +317,15 @@ function buildTextResult(result: RunResult, artifactPaths: string[] = [], parsed
     content: [{ type: "text", text: lines.join("\n") }],
     details: { ...result, artifactPaths, parsedJson },
   };
+}
+
+function sensitiveContentNotes(hits: string[]): string[] {
+  if (hits.length === 0) return [];
+  return [
+    `⚠ Possible human-only checkpoint detected: ${hits.join(", ")}.`,
+    "Do not attempt to click/fill through this yourself — call agent_browser_handoff first so a human can complete it.",
+    "",
+  ];
 }
 
 function parseJsonIfRequested(result: RunResult, requested: boolean): unknown | undefined {
@@ -341,7 +397,9 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
       if (typeof params.outputPath === "string" && params.outputPath.trim()) {
         artifacts.push(await saveArtifact(resolveOutputPath(ctx, params.outputPath, "read.txt"), result.stdout));
       }
-      return buildTextResult(result, artifacts, parseJsonIfRequested(result, params.json === true));
+      const hits = scanForSensitiveContent(result.stdout);
+      const { content, details } = buildTextResult(result, artifacts, parseJsonIfRequested(result, params.json === true), sensitiveContentNotes(hits));
+      return { content, details: { ...details, securityFlags: hits } };
     },
   });
 
@@ -363,7 +421,9 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
       if (typeof params.outputPath === "string" && params.outputPath.trim()) {
         artifacts.push(await saveArtifact(resolveOutputPath(ctx, params.outputPath, "snapshot.txt"), result.stdout));
       }
-      return buildTextResult(result, artifacts);
+      const hits = scanForSensitiveContent(result.stdout);
+      const { content, details } = buildTextResult(result, artifacts, undefined, sensitiveContentNotes(hits));
+      return { content, details: { ...details, securityFlags: hits } };
     },
   });
 
@@ -503,6 +563,153 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
       pushExtraArgs(args, params);
       const result = await runAgentBrowser(args, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
       return buildTextResult(result);
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_browser_handoff",
+    label: "Agent Browser Handoff",
+    description: "Pause AI control and hand the browser to a human for steps AI cannot or must not perform: 2FA codes, CAPTCHA, identity verification. Blocks until the human confirms completion or aborts.",
+    promptSnippet: "Call agent_browser_handoff and stop acting on the page whenever a 2FA/CAPTCHA/identity-verification checkpoint blocks progress.",
+    promptGuidelines: [
+      "Never attempt to solve CAPTCHAs, guess 2FA/OTP codes, or fabricate identity-verification data yourself.",
+      "Call this tool as soon as such a checkpoint appears; do not keep clicking or filling around it.",
+      "If the tool reports no interactive UI is available, stop the task and tell the operator to rerun it interactively.",
+    ],
+    parameters: HandoffSchema,
+    async execute(_id, rawParams, signal, onUpdate, ctx) {
+      const params = rawParams as JsonObject;
+      const category = String(params.category);
+      const reason = String(params.reason);
+      const artifacts: string[] = [];
+
+      if (params.screenshot !== false) {
+        const path = resolveOutputPath(ctx, undefined, "handoff.png");
+        await mkdir(resolve(path, ".."), { recursive: true });
+        const shotArgs: string[] = [];
+        pushCommonArgs(shotArgs, params);
+        shotArgs.push("screenshot", path);
+        await runAgentBrowser(shotArgs, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+        if (existsSync(path)) artifacts.push(path);
+      }
+
+      if (!ctx.hasUI) {
+        return {
+          content: [{
+            type: "text",
+            text: [
+              `Human handoff required (${category}) but no interactive UI is available in this run mode.`,
+              `Reason: ${reason}`,
+              artifacts.length ? `Evidence: ${artifacts.join(", ")}` : undefined,
+              "Stop this task now and ask the operator to rerun it interactively so the handoff can be completed.",
+            ].filter(Boolean).join("\n"),
+          }],
+          details: { ok: false, command: "handoff", args: [category], stdout: "", stderr: "no interactive UI", exitCode: null, signal: null, durationMs: 0, artifactPaths: artifacts },
+          terminate: true,
+        };
+      }
+
+      ctx.ui.notify(`Human handoff needed (${category}): ${reason}`, "warning");
+      ctx.ui.setStatus("agent-browser-handoff", `⏸ Waiting for human: ${reason}`);
+      let choice: string | undefined;
+      try {
+        choice = await ctx.ui.select(
+          `Human handoff required (${category}): ${reason}`,
+          ["Resume - I completed this manually", "Abort this task"],
+        );
+      } finally {
+        ctx.ui.setStatus("agent-browser-handoff", undefined);
+      }
+
+      const resumed = choice === "Resume - I completed this manually";
+      return {
+        content: [{
+          type: "text",
+          text: [
+            resumed
+              ? "Human confirmed the handoff step is complete. Take a fresh agent_browser_snapshot before continuing."
+              : "Human aborted the task during handoff. Stop and report back; do not retry automatically.",
+            artifacts.length ? `Evidence captured: ${artifacts.join(", ")}` : undefined,
+          ].filter(Boolean).join("\n"),
+        }],
+        details: { ok: resumed, command: "handoff", args: [category], stdout: choice ?? "", stderr: "", exitCode: resumed ? 0 : 1, signal: null, durationMs: 0, artifactPaths: artifacts },
+        terminate: true,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_browser_commit",
+    label: "Agent Browser Commit",
+    description: "Gate for irreversible actions (payment, delete, publish/post, send). Captures evidence, requires explicit human confirmation, then performs the click. Never bypassed for unattended runs.",
+    promptSnippet: "Use agent_browser_commit instead of agent_browser_click for the final step of any irreversible action (pay, delete, publish, send).",
+    promptGuidelines: [
+      "Route the final confirming click of a payment, deletion, publish/post, or send action through this tool, never agent_browser_click.",
+      "Write summary in plain language describing exactly what will happen, including amounts or targets when known.",
+      "If this tool reports the human declined or no UI was available, stop and report back — do not retry the click through agent_browser_click.",
+    ],
+    parameters: CommitSchema,
+    async execute(_id, rawParams, signal, onUpdate, ctx) {
+      const params = rawParams as JsonObject;
+      const selector = String(params.selector);
+      const summary = String(params.summary);
+      const riskCategory = String(params.riskCategory);
+      const artifacts: string[] = [];
+
+      if (params.screenshot !== false) {
+        const path = resolveOutputPath(ctx, undefined, "commit-evidence.png");
+        await mkdir(resolve(path, ".."), { recursive: true });
+        const shotArgs: string[] = [];
+        pushCommonArgs(shotArgs, params);
+        shotArgs.push("screenshot", path);
+        await runAgentBrowser(shotArgs, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+        if (existsSync(path)) artifacts.push(path);
+      }
+
+      if (!ctx.hasUI) {
+        return {
+          content: [{
+            type: "text",
+            text: [
+              `Irreversible action blocked (${riskCategory}): no interactive UI available to confirm with a human.`,
+              `Action: ${summary}`,
+              artifacts.length ? `Evidence: ${artifacts.join(", ")}` : undefined,
+              "The click was NOT performed. Stop this task and ask the operator to rerun it interactively.",
+            ].filter(Boolean).join("\n"),
+          }],
+          details: { ok: false, command: "commit", args: [riskCategory, selector], stdout: "", stderr: "no interactive UI", exitCode: null, signal: null, durationMs: 0, artifactPaths: artifacts },
+          terminate: true,
+        };
+      }
+
+      ctx.ui.notify(`Confirmation needed for irreversible action (${riskCategory}): ${summary}`, "warning");
+      const approved = await ctx.ui.confirm(
+        `Confirm irreversible action (${riskCategory})`,
+        `${summary}\n\nTarget: ${selector}\nThis cannot be undone. Proceed?`,
+      );
+
+      if (!approved) {
+        return {
+          content: [{
+            type: "text",
+            text: [
+              "Human declined the irreversible action. The click was NOT performed.",
+              `Action: ${summary}`,
+              artifacts.length ? `Evidence captured before decline: ${artifacts.join(", ")}` : undefined,
+              "Stop and report back; do not retry this action automatically.",
+            ].filter(Boolean).join("\n"),
+          }],
+          details: { ok: false, command: "commit", args: [riskCategory, selector], stdout: "declined", stderr: "", exitCode: 1, signal: null, durationMs: 0, artifactPaths: artifacts },
+          terminate: true,
+        };
+      }
+
+      const args: string[] = [];
+      pushCommonArgs(args, params);
+      args.push("click", selector);
+      pushExtraArgs(args, params);
+      const result = await runAgentBrowser(args, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+      return buildTextResult(result, artifacts);
     },
   });
 

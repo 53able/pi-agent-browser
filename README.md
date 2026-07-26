@@ -65,6 +65,8 @@ pi install ./pi-agent-browser
 - `agent_browser_eval` — evaluate JavaScript in the active tab
 - `agent_browser_state` — save, load, list, show, rename, clear, or clean saved state
 - `agent_browser_close` — close a browser session
+- `agent_browser_handoff` — pause and hand control to a human for 2FA, CAPTCHA, or identity verification
+- `agent_browser_commit` — confirmation gate for irreversible actions (payment, delete, publish, send)
 - `agent_browser_doctor` — run `agent-browser doctor`
 
 ## Common workflows
@@ -155,6 +157,15 @@ Clear all saved states only when intentionally resetting everything:
 - Prefer `agent_browser_read` for textual evidence and `agent_browser_screenshot` for visual evidence.
 - Use `agent_browser_eval` only when `read` or `snapshot` cannot expose the required state.
 - Review saved browser state before clearing broadly.
+
+## Human handoff
+
+Not every step should run unattended. Two tools hand control back to a human at the right moments:
+
+- **Safe boundaries** — `agent_browser_handoff` pauses the agent for steps it cannot or should not perform itself: 2FA/OTP entry, CAPTCHA, identity verification. It captures a screenshot for context, then blocks on a real confirmation dialog until a human resumes or aborts. `agent_browser_read` and `agent_browser_snapshot` also run a lightweight keyword scan and flag likely checkpoints in their output as a nudge to call this tool.
+- **Stop before commit** — `agent_browser_commit` is a dedicated gate for irreversible actions: payment, deletion, publishing, sending. It captures evidence, requires explicit human confirmation before clicking, and refuses outright (without clicking) if no interactive UI is available to ask. Use it instead of `agent_browser_click` for the final confirming step of any such action.
+
+Both tools require an interactive session (TUI or RPC with UI support); in headless/unattended runs they refuse rather than proceed silently.
 
 ## Troubleshooting
 

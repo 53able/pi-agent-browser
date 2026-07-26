@@ -65,6 +65,8 @@ pi install ./pi-agent-browser
 - `agent_browser_eval` — active tab で JavaScript を評価する
 - `agent_browser_state` — saved state を save / load / list / show / rename / clear / clean する
 - `agent_browser_close` — browser session を閉じる
+- `agent_browser_handoff` — 2FA・CAPTCHA・本人確認のために一時停止し、人間に操作を戻す
+- `agent_browser_commit` — 決済・削除・投稿・送信など、やり直しのきかない操作の確認ゲート
 - `agent_browser_doctor` — `agent-browser doctor` を実行する
 
 ## よく使う流れ
@@ -155,6 +157,15 @@ https://example.com をブラウザ経由で読み、outputs/browser/example.md 
 - text evidence には `agent_browser_read`、visual evidence には `agent_browser_screenshot` を優先してください。
 - `agent_browser_eval` は、`read` や `snapshot` では必要な state が取れない場合にだけ使ってください。
 - saved browser state を広く消す前に、対象を確認してください。
+
+## 人間への handoff（引き渡し）
+
+すべての操作を無人で任せるべきではありません。適切なタイミングで人間に操作を戻すためのツールが2つあります。
+
+- **安全な境界線** — `agent_browser_handoff` は、AI自身では対応できない・すべきでない操作（2FA/OTPの入力、CAPTCHA、本人確認）の直前でエージェントを一時停止させます。スクリーンショットで状況を記録したあと、実際のUIダイアログでブロックし、人間が「対応完了」または「中止」を選ぶまで待ちます。`agent_browser_read` / `agent_browser_snapshot` も簡易なキーワード検知を行い、こうしたチェックポイントらしき内容を出力に警告として付加します（この警告自体は停止ではなく、`agent_browser_handoff` を呼ぶきっかけとして扱ってください）。
+- **Commit前の停止** — `agent_browser_commit` は、決済・削除・投稿・送信といった「やり直しのきかない操作」専用の確認ゲートです。証跡を保存し、クリックの前に必ず人間の明示的な確認を求め、承認されない限りクリックは実行されません。対話的なUIが利用できない場合は、クリックせずにそのまま拒否します。こうした操作の最終確認クリックには `agent_browser_click` ではなく必ずこちらを使ってください。
+
+どちらのツールも対話的なセッション（TUI、またはUI対応のRPC）を必要とします。無人・headless実行では、黙って進めるのではなく拒否します。
 
 ## Troubleshooting
 

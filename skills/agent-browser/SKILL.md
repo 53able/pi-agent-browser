@@ -64,6 +64,8 @@ After the human confirms login is complete, subsequent `agent_browser_open`, `ag
 
 **Security note:** The login browser's `--remote-debugging-port` remains open on localhost for as long as the session is alive. This gives any local process full browser control — the same caveat agent-browser's own docs give about `--remote-debugging-port`. Call `agent_browser_close` when done with a session that went through login handoff, rather than leaving it open indefinitely. `agent_browser_close` will terminate the tracked login Chrome process and clean up its debugging port.
 
+Run `agent_browser_doctor` to see which sessions still have live login browsers open. It reports any that are still running (session name, process ID, debugging port, and last known URL) with a reminder to call `agent_browser_close`. Stale tracking entries for processes no longer running are cleaned up silently with no user notification.
+
 Re-running `agent_browser_login_handoff` for the same session name will terminate any previous live login browser for that session before spawning a new one.
 
 ## Common examples

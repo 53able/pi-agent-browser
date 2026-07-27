@@ -275,6 +275,15 @@ function killPidBestEffort(pid?: number): void {
   try { process.kill(pid); } catch { /* already gone / not ours */ }
 }
 
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0); // signal 0 = no-op existence/permission check, does not actually kill
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ESRCH"; // ESRCH = no such process (dead); any other error (e.g. EPERM) means it exists
+  }
+}
+
 function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolveDelay) => {
     if (signal?.aborted) {
@@ -1052,15 +1061,43 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "agent_browser_doctor",
     label: "Agent Browser Doctor",
-    description: "Run agent-browser doctor to verify installation, Chrome, daemon, security, providers, network, and launch tests.",
-    promptSnippet: "Use agent_browser_doctor when browser automation fails or before relying on agent-browser in a workflow.",
+    description: "Run agent-browser doctor to verify installation, Chrome, daemon, security, providers, network, and launch tests. Also reports and cleans up tracked login-handoff browsers (see agent_browser_login_handoff).",
+    promptSnippet: "Use agent_browser_doctor when browser automation fails or before relying on agent-browser in a workflow. It also flags any live login-handoff browsers left open and cleans up stale tracking entries.",
     parameters: DoctorSchema,
     async execute(_id, rawParams, signal, onUpdate, ctx) {
       const params = rawParams as JsonObject;
       const args = ["doctor"];
       if (params.fix === true) args.push("--fix");
       const result = await runAgentBrowser(args, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
-      return buildTextResult(result);
+      const textResult = buildTextResult(result);
+
+      const states = await readSessionStates(ctx.cwd);
+      const liveBrowsers: { session: string; pid: number; port: number | undefined; lastUrl?: string }[] = [];
+      for (const [session, state] of Object.entries(states)) {
+        if (!state.loginBrowserPid) continue;
+        if (!isPidAlive(state.loginBrowserPid)) {
+          await writeSessionState(ctx.cwd, session, { clearLoginBrowserPid: true });
+          continue;
+        }
+        liveBrowsers.push({
+          session: session === DEFAULT_SESSION_KEY ? "(default)" : session,
+          pid: state.loginBrowserPid,
+          port: state.loginDebugPort,
+          lastUrl: state.lastUrl,
+        });
+      }
+
+      if (liveBrowsers.length > 0) {
+        const lines = [
+          "",
+          "Live login browsers (from agent_browser_login_handoff) still open:",
+          ...liveBrowsers.map((b) => `- ${b.session}: pid ${b.pid}, debug port ${b.port ?? "?"}${b.lastUrl ? `, last url ${b.lastUrl}` : ""}`),
+          "Call agent_browser_close for each session when done — these hold an open remote-debugging port until closed.",
+        ];
+        textResult.content[0].text += lines.join("\n");
+      }
+
+      return textResult;
     },
   });
 }

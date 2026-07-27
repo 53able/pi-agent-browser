@@ -177,7 +177,9 @@ https://example.com をブラウザ経由で読み、outputs/browser/example.md 
 agent-browser doctor
 ```
 
-または Pi に `agent_browser_doctor` を実行させてください。
+または Pi に `agent_browser_doctor` を実行させてください。インストール、Chrome、daemon、security、provider、network、launch test を確認します。`agent_browser_login_handoff` で作ったセッションでまだ開いているログインブラウザも報告し、期限切れ追跡データを自動削除します。
+
+`agent_browser_login_handoff` で作ったセッションの中で、まだ生存しているログインブラウザがあれば、`agent_browser_doctor` がそれらを報告します（セッション名、プロセス ID、デバッグポート、最後に開いていた URL を表示）。終わったら各セッションに対して `agent_browser_close` を呼んでください — これらのセッションはブラウザを閉じるまでリモートデバッグポートが開いたままです。期限切れエントリ（実行中でなくなったプロセスの追跡データ）は、何も通知することなく自動削除されます。
 
 よくある修正:
 

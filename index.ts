@@ -764,7 +764,7 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "agent_browser_login_handoff",
     label: "Agent Browser Login Handoff",
-    description: "Launch a real, non-CDP-attached Chrome for an interactive login (e.g. Google sign-in) that automation frameworks get blocked from, then attach agent-browser to the resulting session once the human confirms login is complete. Blocks until the human confirms or aborts.",
+    description: "Launch a real, non-CDP-attached Chrome for an interactive login (e.g. Google sign-in) that automation frameworks get blocked from. Once the human confirms login is complete, captures the authenticated cookies/storage and loads them into a fresh, ordinary agent-browser session. Blocks until the human confirms or aborts.",
     promptSnippet: "Use agent_browser_login_handoff (not agent_browser_open) whenever a task requires an interactive Google/OAuth-style login.",
     promptGuidelines: [
       "Never attempt an interactive Google/OAuth-style login via agent_browser_open, agent_browser_click, or agent_browser_fill — those attach CDP immediately, and Google blocks sign-in for CDP-attached sessions regardless of profile or cookies.",
@@ -889,15 +889,42 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
         };
       }
 
-      const attachArgs = ["--cdp", String(port), "--session", session, "open"];
-      const result = await runAgentBrowser(attachArgs, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+      // Do NOT keep driving the live --cdp connection as the ongoing session: `agent-browser
+      // --cdp <port> ... open` (no url) opens a brand-new blank page/context in the connected
+      // browser rather than reusing the tab the human actually authenticated in, leaving the
+      // "attached" session on about:blank with no auth. Instead follow agent-browser's own
+      // documented pattern for this exact scenario (see its authentication.md "Import Auth
+      // from Your Browser" / "Two-Factor Authentication" sections): extract the authenticated
+      // cookies/storage from the login browser via `state save`, close the disposable login
+      // browser, then load that state into a normal, freshly-launched session via `--state`.
+      const authStatePath = join(profileDir, "auth-state.json");
+      const saveArgs = ["--cdp", String(port), "state", "save", authStatePath];
+      const saveResult = await runAgentBrowser(saveArgs, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+      try { child.kill(); } catch { /* best-effort; the login browser is disposable once we've extracted its auth state */ }
+
+      if (!saveResult.ok) {
+        return {
+          content: [{
+            type: "text",
+            text: [
+              "Login browser was confirmed by the human, but extracting its authenticated state via `state save` failed. Do not assume the session is usable.",
+              `Command: ${saveResult.command} ${saveResult.args.map((a) => JSON.stringify(a)).join(" ")}`,
+            ].join("\n"),
+          }],
+          details: { ...saveResult, artifactPaths: [] },
+          terminate: true,
+        };
+      }
+
+      const loadArgs = ["--session", session, "--restore", "--state", authStatePath, "open", url];
+      const result = await runAgentBrowser(loadArgs, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
 
       if (!result.ok) {
         return {
           content: [{
             type: "text",
             text: [
-              "Login browser was confirmed by the human, but attaching agent-browser via --cdp failed. Do not assume the session is usable.",
+              "Login state was captured from the human's browser, but loading it into a fresh agent-browser session failed. Do not assume the session is usable.",
               `Command: ${result.command} ${result.args.map((a) => JSON.stringify(a)).join(" ")}`,
             ].join("\n"),
           }],
@@ -906,13 +933,13 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
         };
       }
 
-      await writeSessionState(ctx.cwd, session, { headed: true, lastUrl: url });
+      await writeSessionState(ctx.cwd, session, { headed: false, lastUrl: url });
 
       return {
         content: [{
           type: "text",
           text: [
-            "Login handoff complete and agent-browser is now attached to the human's authenticated Chrome session.",
+            "Login handoff complete: the human's authenticated cookies/storage were captured and loaded into a fresh agent-browser session.",
             `Session: ${session === DEFAULT_SESSION_KEY ? "(default)" : session}`,
             "Take a fresh agent_browser_snapshot before continuing.",
           ].join("\n"),

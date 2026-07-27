@@ -44,7 +44,7 @@ Two tools exist so the agent stops and hands control back to a human instead of 
 
 `agent_browser_login_handoff` solves a specific problem: Google and similar OAuth providers block sign-in when `agent-browser open` is used, because agent-browser attaches a remote debugging protocol (CDP) session the instant Chrome launches, and Google detects this automation marker and rejects the login attempt regardless of profile, cookies, or executable.
 
-This tool spawns a plain, un-instrumented Chrome process (not through `agent-browser open`) with a remote debugging port and a dedicated persistent profile, so no CDP client is attached while the human logs in. Chrome behaves like an ordinary browser to Google during sign-in. Only after the human confirms login is complete does the tool attach `agent-browser` via CDP to that already-authenticated browser for all subsequent automated snapshot, read, and click operations.
+This tool spawns a plain, un-instrumented Chrome process (not through `agent-browser open`) with a remote debugging port and a dedicated persistent profile, so no CDP client is attached while the human logs in. Chrome behaves like an ordinary browser to Google during sign-in. After the human confirms login is complete, the tool captures the authenticated cookies and storage from that browser (`agent-browser state save`), closes the disposable login browser, and loads that captured state into a fresh, ordinary agent-browser session (`agent-browser state load`) for all subsequent automated snapshot, read, and click operations. (An earlier version tried to keep driving the login browser live over CDP; that opened a disconnected blank tab instead of reusing the authenticated one, so state capture-and-load is used instead.)
 
 **Important:** this is an architecture fix, not detection evasion. The tool does not hide webdriver flags or automation fingerprints — it simply avoids having a CDP session attached during the interactive login moment itself.
 
@@ -60,7 +60,7 @@ Example call:
 }
 ```
 
-After the human confirms login is complete, subsequent `agent_browser_open`, `agent_browser_snapshot`, `agent_browser_click`, and other calls with the same `session` name will reuse the authenticated browser state and operate normally. The session is marked as headed in the session-state tracking, so later calls to `agent_browser_handoff` on the same session won't false-flag it as headless.
+After the human confirms login is complete, subsequent `agent_browser_open`, `agent_browser_snapshot`, `agent_browser_click`, and other calls with the same `session` name will reuse the authenticated browser state and operate normally. This new session runs headless by default (it is a fresh agent-browser session, not the disposable login browser, which is closed once its auth state is captured); reopen it with `headed: true` if you need to see it.
 
 ## Common examples
 

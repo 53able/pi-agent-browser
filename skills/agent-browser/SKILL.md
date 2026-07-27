@@ -40,6 +40,28 @@ Two tools exist so the agent stops and hands control back to a human instead of 
 
 `agent_browser_open` records whether each named session was launched with `headed: true`. When `agent_browser_handoff` runs for a session that was not opened headed, it automatically prepends a warning naming the session and the exact `agent_browser_open` arguments (including the last known URL) needed to reopen it visibly, instead of leaving the human to guess. Prefer `headed: true` from the start for any task that might hit a login, 2FA, CAPTCHA, or identity-verification step — a human can only intervene through `agent_browser_handoff` if a visible window already exists. Note that some verification challenges are single-use or session-bound, so reopening may require restarting the login flow rather than resuming mid-challenge.
 
+### For interactive login flows (Google, OAuth, and similar)
+
+`agent_browser_login_handoff` solves a specific problem: Google and similar OAuth providers block sign-in when `agent-browser open` is used, because agent-browser attaches a remote debugging protocol (CDP) session the instant Chrome launches, and Google detects this automation marker and rejects the login attempt regardless of profile, cookies, or executable.
+
+This tool spawns a plain, un-instrumented Chrome process (not through `agent-browser open`) with a remote debugging port and a dedicated persistent profile, so no CDP client is attached while the human logs in. Chrome behaves like an ordinary browser to Google during sign-in. Only after the human confirms login is complete does the tool attach `agent-browser` via CDP to that already-authenticated browser for all subsequent automated snapshot, read, and click operations.
+
+**Important:** this is an architecture fix, not detection evasion. The tool does not hide webdriver flags or automation fingerprints — it simply avoids having a CDP session attached during the interactive login moment itself.
+
+Use `agent_browser_login_handoff` instead of `agent_browser_open` for any task expected to hit an interactive Google, OAuth, or similar sign-in flow. Never try to push through such a login via `agent_browser_open` + click/fill — that's the exact failure mode this tool exists to avoid.
+
+Example call:
+
+```json
+{
+  "url": "https://myapp.com/login",
+  "session": "google-oauth-flow",
+  "reason": "User must complete Google OAuth sign-in for app access"
+}
+```
+
+After the human confirms login is complete, subsequent `agent_browser_open`, `agent_browser_snapshot`, `agent_browser_click`, and other calls with the same `session` name will reuse the authenticated browser state and operate normally. The session is marked as headed in the session-state tracking, so later calls to `agent_browser_handoff` on the same session won't false-flag it as headless.
+
 ## Common examples
 
 Read a public page:

@@ -4,6 +4,7 @@ import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { constants, existsSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { spawn } from "node:child_process";
+import { createServer } from "node:net";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_PREVIEW_CHARS = 12_000;
@@ -200,6 +201,15 @@ const HandoffSchema = Type.Object(commonSchema({
   screenshot: optionalBoolean("Capture a screenshot for the human before waiting. Defaults to true."),
 }));
 
+const LoginHandoffSchema = Type.Object({
+  url: Type.String({ description: "Login/app URL to open in a real, non-automated browser for the human to sign in." }),
+  session: optionalString("agent-browser session name to attach as after login completes. Defaults to the default session."),
+  reason: Type.String({ description: "Human-readable reason for the login handoff (e.g. 'Googleアカウントへのログインが必要です')." }),
+  executablePath: optionalString("Override path to a real Chrome executable. Auto-detected on macOS if omitted."),
+  profileDir: optionalString("Override persistent user-data-dir for the login browser. Defaults to a per-session directory reused across runs so re-running the same session reuses the same authenticated profile."),
+  timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Tool execution timeout in milliseconds for the post-login attach step." })),
+});
+
 const CommitSchema = Type.Object(commonSchema({
   selector: Type.String({ description: "Element ref from snapshot, such as @e2, or a CSS selector, for the irreversible action (e.g. final pay/post/delete button)." }),
   summary: Type.String({ description: "Plain-language description of what this click will do, e.g. '¥12,000 の決済を確定する' or 'この投稿を完全に削除する'." }),
@@ -233,6 +243,61 @@ async function findAgentBrowserBin(): Promise<string> {
     }
   }
   return "agent-browser";
+}
+
+function findRealChromeExecutable(): string | undefined {
+  const macPath = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+  if (existsSync(macPath)) return macPath;
+  return undefined;
+}
+
+async function findFreePort(): Promise<number> {
+  return await new Promise((resolvePort, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : undefined;
+      server.close(() => {
+        if (port) resolvePort(port);
+        else reject(new Error("Could not determine a free port."));
+      });
+    });
+  });
+}
+
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolveDelay) => {
+    if (signal?.aborted) {
+      resolveDelay();
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolveDelay();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolveDelay();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function waitForDebugPort(port: number, timeoutMs = 8000, intervalMs = 300, signal?: AbortSignal): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (signal?.aborted) return false;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/json/version`);
+      if (res.ok) return true;
+    } catch {
+      // Not up yet; keep polling.
+    }
+    if (signal?.aborted) return false;
+    await abortableDelay(intervalMs, signal);
+  }
+  return false;
 }
 
 function pushCommonArgs(args: string[], params: JsonObject): void {
@@ -691,6 +756,168 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
           ].filter(Boolean).join("\n"),
         }],
         details: { ok: resumed, command: "handoff", args: [category], stdout: choice ?? "", stderr: "", exitCode: resumed ? 0 : 1, signal: null, durationMs: 0, artifactPaths: artifacts },
+        terminate: true,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_browser_login_handoff",
+    label: "Agent Browser Login Handoff",
+    description: "Launch a real, non-CDP-attached Chrome for an interactive login (e.g. Google sign-in) that automation frameworks get blocked from, then attach agent-browser to the resulting session once the human confirms login is complete. Blocks until the human confirms or aborts.",
+    promptSnippet: "Use agent_browser_login_handoff (not agent_browser_open) whenever a task requires an interactive Google/OAuth-style login.",
+    promptGuidelines: [
+      "Never attempt an interactive Google/OAuth-style login via agent_browser_open, agent_browser_click, or agent_browser_fill — those attach CDP immediately, and Google blocks sign-in for CDP-attached sessions regardless of profile or cookies.",
+      "Call this tool instead whenever a task is expected to require signing into a Google account or a similarly automation-hostile login flow.",
+      "After this tool reports success, take a fresh agent_browser_snapshot before continuing — do not assume page state.",
+      "If this tool reports no interactive UI, a decline, or a failure, stop the task and report back; do not retry via agent_browser_open.",
+    ],
+    parameters: LoginHandoffSchema,
+    async execute(_id, rawParams, signal, onUpdate, ctx) {
+      const params = rawParams as JsonObject;
+      const url = String(params.url);
+      const reason = String(params.reason);
+      const session = sessionKey(params);
+
+      const executablePath = typeof params.executablePath === "string" && params.executablePath.trim()
+        ? params.executablePath.trim()
+        : findRealChromeExecutable();
+
+      if (!executablePath) {
+        return {
+          content: [{
+            type: "text",
+            text: [
+              "Could not find a real Chrome executable for the login handoff.",
+              "Auto-detection only checks the default macOS install path (/Applications/Google Chrome.app/Contents/MacOS/Google Chrome).",
+              "Pass executablePath explicitly, or install Google Chrome, and retry. Do not fall back to agent-browser's bundled test browser — it will be blocked by Google the same way.",
+            ].join("\n"),
+          }],
+          details: { ok: false, command: "login-handoff", args: [], stdout: "", stderr: "no chrome executable found", exitCode: null, signal: null, durationMs: 0 },
+          terminate: true,
+        };
+      }
+
+      const profileDir = typeof params.profileDir === "string" && params.profileDir.trim()
+        ? params.profileDir.trim()
+        : join(ctx.cwd, SESSION_STATE_DIR, "login-profiles", session);
+      await mkdir(profileDir, { recursive: true });
+
+      const port = await findFreePort();
+
+      let spawnError: Error | undefined;
+      const child = spawn(executablePath, [
+        `--remote-debugging-port=${port}`,
+        `--user-data-dir=${profileDir}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        url,
+      ], { detached: true, stdio: "ignore" });
+      // Persistent handler: without this, an 'error' event (e.g. ENOENT for a bad
+      // executablePath) on this detached/unref'd child is unhandled and crashes the
+      // whole host process whenever it fires, even long after this tool call returns.
+      child.on("error", (error) => {
+        spawnError = error;
+      });
+      child.unref();
+
+      const debugPortWaitController = new AbortController();
+      const debugPortUp = spawnError ? false : await Promise.race([
+        waitForDebugPort(port, undefined, undefined, debugPortWaitController.signal),
+        new Promise<boolean>((resolveRace) => {
+          child.once("error", () => resolveRace(false));
+        }),
+      ]);
+      // Whichever branch lost the race must stop polling promptly instead of
+      // holding the event loop open for its own full timeout in the background.
+      debugPortWaitController.abort();
+      if (spawnError || !debugPortUp) {
+        try { child.kill(); } catch { /* best-effort */ }
+        return {
+          content: [{
+            type: "text",
+            text: [
+              spawnError
+                ? `Failed to launch the login browser: ${spawnError.message}`
+                : `Failed to confirm the login browser's debug port (127.0.0.1:${port}) came up in time.`,
+              `Attempted to launch: ${executablePath}`,
+              "The login browser was not confirmed usable; it has been asked to close. Stop and report back.",
+            ].join("\n"),
+          }],
+          details: { ok: false, command: "login-handoff", args: [executablePath, url], stdout: "", stderr: spawnError ? spawnError.message : "debug port did not come up", exitCode: null, signal: null, durationMs: 0 },
+          terminate: true,
+        };
+      }
+
+      if (!ctx.hasUI) {
+        try { child.kill(); } catch { /* best-effort */ }
+        return {
+          content: [{
+            type: "text",
+            text: [
+              "Login handoff required but no interactive UI is available in this run mode.",
+              `Reason: ${reason}`,
+              "The login browser has been closed. Stop this task now and ask the operator to rerun it interactively so the login can be completed.",
+            ].join("\n"),
+          }],
+          details: { ok: false, command: "login-handoff", args: [executablePath, url], stdout: "", stderr: "no interactive UI", exitCode: null, signal: null, durationMs: 0 },
+          terminate: true,
+        };
+      }
+
+      ctx.ui.notify(`Login handoff needed: ${reason}`, "warning");
+      ctx.ui.setStatus("agent-browser-login-handoff", `⏸ ログイン待機中 — ${reason}`);
+      let choice: string | undefined;
+      try {
+        choice = await ctx.ui.select(
+          `Login required: ${reason}`,
+          ["Resume - I completed the login", "Abort this task"],
+        );
+      } finally {
+        ctx.ui.setStatus("agent-browser-login-handoff", undefined);
+      }
+
+      if (choice !== "Resume - I completed the login") {
+        try { child.kill(); } catch { /* best-effort */ }
+        return {
+          content: [{
+            type: "text",
+            text: "Human aborted the task during login handoff. Stop and report back; do not retry automatically.",
+          }],
+          details: { ok: false, command: "login-handoff", args: [executablePath, url], stdout: choice ?? "", stderr: "", exitCode: 1, signal: null, durationMs: 0 },
+          terminate: true,
+        };
+      }
+
+      const attachArgs = ["--cdp", String(port), "--session", session, "open"];
+      const result = await runAgentBrowser(attachArgs, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+
+      if (!result.ok) {
+        return {
+          content: [{
+            type: "text",
+            text: [
+              "Login browser was confirmed by the human, but attaching agent-browser via --cdp failed. Do not assume the session is usable.",
+              `Command: ${result.command} ${result.args.map((a) => JSON.stringify(a)).join(" ")}`,
+            ].join("\n"),
+          }],
+          details: { ...result, artifactPaths: [] },
+          terminate: true,
+        };
+      }
+
+      await writeSessionState(ctx.cwd, session, { headed: true, lastUrl: url });
+
+      return {
+        content: [{
+          type: "text",
+          text: [
+            "Login handoff complete and agent-browser is now attached to the human's authenticated Chrome session.",
+            `Session: ${session === DEFAULT_SESSION_KEY ? "(default)" : session}`,
+            "Take a fresh agent_browser_snapshot before continuing.",
+          ].join("\n"),
+        }],
+        details: { ...result, artifactPaths: [] },
         terminate: true,
       };
     },

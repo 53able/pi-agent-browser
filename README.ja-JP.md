@@ -66,6 +66,7 @@ pi install ./pi-agent-browser
 - `agent_browser_state` — saved state を save / load / list / show / rename / clear / clean する
 - `agent_browser_close` — browser session を閉じる
 - `agent_browser_handoff` — 2FA・CAPTCHA・本人確認のために一時停止し、人間に操作を戻す
+- `agent_browser_login_handoff` — インタラクティブなログイン（Google、OAuth など）のための無人 browser を起動する
 - `agent_browser_commit` — 決済・削除・投稿・送信など、やり直しのきかない操作の確認ゲート
 - `agent_browser_doctor` — `agent-browser doctor` を実行する
 
@@ -160,14 +161,15 @@ https://example.com をブラウザ経由で読み、outputs/browser/example.md 
 
 ## 人間への handoff（引き渡し）
 
-すべての操作を無人で任せるべきではありません。適切なタイミングで人間に操作を戻すためのツールが2つあります。
+すべての操作を無人で任せるべきではありません。適切なタイミングで人間に操作を戻すためのツールが3つあります。
 
 - **安全な境界線** — `agent_browser_handoff` は、AI自身では対応できない・すべきでない操作（2FA/OTPの入力、CAPTCHA、本人確認）の直前でエージェントを一時停止させます。スクリーンショットで状況を記録したあと、実際のUIダイアログでブロックし、人間が「対応完了」または「中止」を選ぶまで待ちます。`agent_browser_read` / `agent_browser_snapshot` も簡易なキーワード検知を行い、こうしたチェックポイントらしき内容を出力に警告として付加します（この警告自体は停止ではなく、`agent_browser_handoff` を呼ぶきっかけとして扱ってください）。
+- **インタラクティブなログイン** — `agent_browser_login_handoff` は、Google や OAuth など多くのプロバイダで sign-in がブロックされる問題を解決します。これは、agent-browser が使われた時点でオートメーション検出が起きるため、ログイン中に拒否されるというもの。このツールは CDP が接続されていない無人 Chrome プロセスを起動し、人間が正常にログインできるようにしてから、ログイン成功後に `agent-browser` を接続します。Google や OAuth の sign-in フローが期待されるタスクでは、`agent_browser_open` ではなく必ずこちらを使ってください。
 - **Commit前の停止** — `agent_browser_commit` は、決済・削除・投稿・送信といった「やり直しのきかない操作」専用の確認ゲートです。証跡を保存し、クリックの前に必ず人間の明示的な確認を求め、承認されない限りクリックは実行されません。対話的なUIが利用できない場合は、クリックせずにそのまま拒否します。こうした操作の最終確認クリックには `agent_browser_click` ではなく必ずこちらを使ってください。
 
-どちらのツールも対話的なセッション（TUI、またはUI対応のRPC）を必要とします。無人・headless実行では、黙って進めるのではなく拒否します。
+3つのツールすべてが対話的なセッション（TUI、またはUI対応のRPC）を必要とします。無人・headless実行では、黙って進めるのではなく拒否します。
 
-`agent_browser_open`は、各セッションが`headed: true`で起動されたかどうかも記録します。`agent_browser_handoff`が、headedで開かれていないセッションに対して呼ばれた場合、人間への警告に加えて、可視ウィンドウを開き直すための`agent_browser_open`の引数（セッション名、`headed: true`、`restore: true`、最後に開いていたURL）をそのまま提示します — どのコマンドを打ち直せばよいか推測する必要はありません。ログインや2FA、CAPTCHA、本人確認に差し掛かる可能性があるタスクでは、最初から`headed: true`で開くことを推奨します。一部の確認チャレンジは使い切り・期限付きのため、途中で開き直すとログインからやり直しになることがあります。
+`agent_browser_open` と `agent_browser_login_handoff` は、各セッションが`headed: true`で起動されたかどうかも記録します。`agent_browser_handoff`が、headedで開かれていないセッションに対して呼ばれた場合、人間への警告に加えて、可視ウィンドウを開き直すための`agent_browser_open`の引数（セッション名、`headed: true`、`restore: true`、最後に開いていたURL）をそのまま提示します — どのコマンドを打ち直せばよいか推測する必要はありません。ログインや2FA、CAPTCHA、本人確認に差し掛かる可能性があるタスクでは、最初から`headed: true`で開くことを推奨します。一部の確認チャレンジは使い切り・期限付きのため、途中で開き直すとログインからやり直しになることがあります。
 
 ## Troubleshooting
 

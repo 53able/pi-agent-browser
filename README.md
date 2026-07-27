@@ -66,6 +66,7 @@ pi install ./pi-agent-browser
 - `agent_browser_state` — save, load, list, show, rename, clear, or clean saved state
 - `agent_browser_close` — close a browser session
 - `agent_browser_handoff` — pause and hand control to a human for 2FA, CAPTCHA, or identity verification
+- `agent_browser_login_handoff` — spawn an unattended browser for interactive login flows (Google, OAuth)
 - `agent_browser_commit` — confirmation gate for irreversible actions (payment, delete, publish, send)
 - `agent_browser_doctor` — run `agent-browser doctor`
 
@@ -160,14 +161,15 @@ Clear all saved states only when intentionally resetting everything:
 
 ## Human handoff
 
-Not every step should run unattended. Two tools hand control back to a human at the right moments:
+Not every step should run unattended. Three tools hand control back to a human at the right moments:
 
 - **Safe boundaries** — `agent_browser_handoff` pauses the agent for steps it cannot or should not perform itself: 2FA/OTP entry, CAPTCHA, identity verification. It captures a screenshot for context, then blocks on a real confirmation dialog until a human resumes or aborts. `agent_browser_read` and `agent_browser_snapshot` also run a lightweight keyword scan and flag likely checkpoints in their output as a nudge to call this tool.
+- **Interactive login flows** — `agent_browser_login_handoff` solves the problem that Google, OAuth, and similar providers block sign-in when agent-browser is used, because automation detection happens during the login step itself. This tool spawns an unattended Chrome process (with no CDP attached) so the human can log in normally, then attaches `agent-browser` after login succeeds. Use this instead of `agent_browser_open` whenever a task is expected to hit an interactive Google or OAuth sign-in flow.
 - **Stop before commit** — `agent_browser_commit` is a dedicated gate for irreversible actions: payment, deletion, publishing, sending. It captures evidence, requires explicit human confirmation before clicking, and refuses outright (without clicking) if no interactive UI is available to ask. Use it instead of `agent_browser_click` for the final confirming step of any such action.
 
-Both tools require an interactive session (TUI or RPC with UI support); in headless/unattended runs they refuse rather than proceed silently.
+All three tools require an interactive session (TUI or RPC with UI support); in headless/unattended runs they refuse rather than proceed silently.
 
-`agent_browser_open` also remembers whether each named session was launched with `headed: true`. If `agent_browser_handoff` is called for a session that was not opened headed, it automatically warns the human and includes the exact `agent_browser_open` arguments (session name, `headed: true`, `restore: true`, and the last known URL) needed to reopen a visible window — no more guessing which command to rerun. Prefer `headed: true` up front for any task that might hit a login, 2FA, CAPTCHA, or identity-verification step, since some challenges are single-use and reopening mid-flow may require restarting the login.
+`agent_browser_open` and `agent_browser_login_handoff` both remember whether each named session was launched with `headed: true`. If `agent_browser_handoff` is called for a session that was not opened headed, it automatically warns the human and includes the exact `agent_browser_open` arguments (session name, `headed: true`, `restore: true`, and the last known URL) needed to reopen a visible window — no more guessing which command to rerun. Prefer `headed: true` up front for any task that might hit a login, 2FA, CAPTCHA, or identity-verification step, since some challenges are single-use and reopening mid-flow may require restarting the login.
 
 ## Troubleshooting
 

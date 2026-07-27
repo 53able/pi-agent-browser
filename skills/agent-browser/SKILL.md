@@ -44,7 +44,7 @@ Two tools exist so the agent stops and hands control back to a human instead of 
 
 `agent_browser_login_handoff` solves a specific problem: Google and similar OAuth providers block sign-in when `agent-browser open` is used, because agent-browser attaches a remote debugging protocol (CDP) session the instant Chrome launches, and Google detects this automation marker and rejects the login attempt regardless of profile, cookies, or executable.
 
-This tool spawns a plain, un-instrumented Chrome process (not through `agent-browser open`) with a remote debugging port and a dedicated persistent profile, so no CDP client is attached while the human logs in. Chrome behaves like an ordinary browser to Google during sign-in. After the human confirms login is complete, the tool captures the authenticated cookies and storage from that browser (`agent-browser state save`), closes the disposable login browser, and loads that captured state into a fresh, ordinary agent-browser session (`agent-browser state load`) for all subsequent automated snapshot, read, and click operations. (An earlier version tried to keep driving the login browser live over CDP; that opened a disconnected blank tab instead of reusing the authenticated one, so state capture-and-load is used instead.)
+This tool spawns a plain, un-instrumented Chrome process (not through `agent-browser open`) with a remote debugging port and a dedicated persistent profile, so no CDP client is attached while the human logs in. Chrome behaves like an ordinary browser to Google during sign-in. After the human confirms login is complete, the still-running login browser is **live-attached to the named agent-browser session** (via `agent-browser --session <name> --cdp <port> snapshot`, not `open`, to avoid navigating away from the authenticated page) and **kept open as the permanent backing browser for that session**. All subsequent automated snapshot, read, click, and other operations continue to work against it via `--session <name>` alone, unchanged.
 
 **Important:** this is an architecture fix, not detection evasion. The tool does not hide webdriver flags or automation fingerprints — it simply avoids having a CDP session attached during the interactive login moment itself.
 
@@ -60,7 +60,11 @@ Example call:
 }
 ```
 
-After the human confirms login is complete, subsequent `agent_browser_open`, `agent_browser_snapshot`, `agent_browser_click`, and other calls with the same `session` name will reuse the authenticated browser state and operate normally. This new session runs headless by default (it is a fresh agent-browser session, not the disposable login browser, which is closed once its auth state is captured); reopen it with `headed: true` if you need to see it.
+After the human confirms login is complete, subsequent `agent_browser_open`, `agent_browser_snapshot`, `agent_browser_click`, and other calls with the same `session` name will reuse the authenticated browser and operate normally. **The login browser window remains visible and open indefinitely** — this is a real, user-visible Chrome window with an open remote-debugging port on `127.0.0.1` that any local process can access. The session is recorded as `headed: true` (since the authenticated browser is still running).
+
+**Security note:** The login browser's `--remote-debugging-port` remains open on localhost for as long as the session is alive. This gives any local process full browser control — the same caveat agent-browser's own docs give about `--remote-debugging-port`. Call `agent_browser_close` when done with a session that went through login handoff, rather than leaving it open indefinitely. `agent_browser_close` will terminate the tracked login Chrome process and clean up its debugging port.
+
+Re-running `agent_browser_login_handoff` for the same session name will terminate any previous live login browser for that session before spawning a new one.
 
 ## Common examples
 

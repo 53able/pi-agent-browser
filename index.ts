@@ -43,7 +43,9 @@ const SESSION_STATE_DIR = ".pi-agent-browser";
 const SESSION_STATE_FILE = "sessions.json";
 const DEFAULT_SESSION_KEY = "__default__";
 
-type SessionState = { headed: boolean; lastUrl?: string; updatedAt: string };
+type SessionState = { headed: boolean; lastUrl?: string; loginBrowserPid?: number; loginDebugPort?: number; updatedAt: string };
+
+type SessionStatePatch = Partial<Omit<SessionState, "updatedAt">> & { clearLoginBrowserPid?: boolean };
 
 function sessionKey(params: JsonObject): string {
   return typeof params.session === "string" && params.session.trim() ? params.session.trim() : DEFAULT_SESSION_KEY;
@@ -58,7 +60,7 @@ async function readSessionStates(cwd: string): Promise<Record<string, SessionSta
   }
 }
 
-async function writeSessionState(cwd: string, session: string, patch: Partial<Omit<SessionState, "updatedAt">>): Promise<void> {
+async function writeSessionState(cwd: string, session: string, patch: SessionStatePatch): Promise<void> {
   const dir = join(cwd, SESSION_STATE_DIR);
   await mkdir(dir, { recursive: true });
   const states = await readSessionStates(cwd);
@@ -66,6 +68,8 @@ async function writeSessionState(cwd: string, session: string, patch: Partial<Om
   states[session] = {
     headed: patch.headed ?? previous?.headed ?? false,
     lastUrl: patch.lastUrl ?? previous?.lastUrl,
+    loginBrowserPid: patch.clearLoginBrowserPid ? undefined : (patch.loginBrowserPid ?? previous?.loginBrowserPid),
+    loginDebugPort: patch.clearLoginBrowserPid ? undefined : (patch.loginDebugPort ?? previous?.loginDebugPort),
     updatedAt: new Date().toISOString(),
   };
   await writeFile(join(dir, SESSION_STATE_FILE), JSON.stringify(states, null, 2), "utf8");
@@ -264,6 +268,11 @@ async function findFreePort(): Promise<number> {
       });
     });
   });
+}
+
+function killPidBestEffort(pid?: number): void {
+  if (!pid) return;
+  try { process.kill(pid); } catch { /* already gone / not ours */ }
 }
 
 function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -673,12 +682,28 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
     parameters: CloseSchema,
     async execute(_id, rawParams, signal, onUpdate, ctx) {
       const params = rawParams as JsonObject;
+      const states = await readSessionStates(ctx.cwd);
       const args: string[] = [];
       pushCommonArgs(args, params);
       args.push("close");
       if (params.all === true) args.push("--all");
       pushExtraArgs(args, params);
       const result = await runAgentBrowser(args, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+
+      // agent-browser close only detaches an externally-spawned login Chrome; kill the tracked pid(s) ourselves.
+      if (params.all === true) {
+        for (const [name, st] of Object.entries(states)) {
+          if (!st.loginBrowserPid) continue;
+          killPidBestEffort(st.loginBrowserPid);
+          await writeSessionState(ctx.cwd, name, { clearLoginBrowserPid: true });
+        }
+      } else {
+        const session = sessionKey(params);
+        if (states[session]?.loginBrowserPid) {
+          killPidBestEffort(states[session]?.loginBrowserPid);
+          await writeSessionState(ctx.cwd, session, { clearLoginBrowserPid: true });
+        }
+      }
       return buildTextResult(result);
     },
   });
@@ -764,12 +789,13 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "agent_browser_login_handoff",
     label: "Agent Browser Login Handoff",
-    description: "Launch a real, non-CDP-attached Chrome for an interactive login (e.g. Google sign-in) that automation frameworks get blocked from. Once the human confirms login is complete, captures the authenticated cookies/storage and loads them into a fresh, ordinary agent-browser session. Blocks until the human confirms or aborts.",
+    description: "Launch a real, non-CDP-attached Chrome for an interactive login (e.g. Google sign-in) that automation frameworks get blocked from. Once the human confirms login is complete, live-attaches that still-running browser to the named agent-browser session and keeps it open as the session's backing browser (no cookie/state export). Blocks until the human confirms or aborts.",
     promptSnippet: "Use agent_browser_login_handoff (not agent_browser_open) whenever a task requires an interactive Google/OAuth-style login.",
     promptGuidelines: [
       "Never attempt an interactive Google/OAuth-style login via agent_browser_open, agent_browser_click, or agent_browser_fill — those attach CDP immediately, and Google blocks sign-in for CDP-attached sessions regardless of profile or cookies.",
       "Call this tool instead whenever a task is expected to require signing into a Google account or a similarly automation-hostile login flow.",
       "After this tool reports success, take a fresh agent_browser_snapshot before continuing — do not assume page state.",
+      "On success the login browser stays open and IS the session's live backing browser; drive it with the normal agent_browser_* tools by session name, and call agent_browser_close when done to shut it down (it holds an open remote-debugging port until then).",
       "If this tool reports no interactive UI, a decline, or a failure, stop the task and report back; do not retry via agent_browser_open.",
     ],
     parameters: LoginHandoffSchema,
@@ -804,6 +830,10 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
       await mkdir(profileDir, { recursive: true });
 
       const port = await findFreePort();
+
+      // Supersede an older live login browser for this session so re-running doesn't leak it.
+      const prior = (await readSessionStates(ctx.cwd))[session];
+      killPidBestEffort(prior?.loginBrowserPid);
 
       let spawnError: Error | undefined;
       const child = spawn(executablePath, [
@@ -889,42 +919,27 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
         };
       }
 
-      // Do NOT keep driving the live --cdp connection as the ongoing session: `agent-browser
-      // --cdp <port> ... open` (no url) opens a brand-new blank page/context in the connected
-      // browser rather than reusing the tab the human actually authenticated in, leaving the
-      // "attached" session on about:blank with no auth. Instead follow agent-browser's own
-      // documented pattern for this exact scenario (see its authentication.md "Import Auth
-      // from Your Browser" / "Two-Factor Authentication" sections): extract the authenticated
-      // cookies/storage from the login browser via `state save`, close the disposable login
-      // browser, then load that state into a normal, freshly-launched session via `--state`.
-      const authStatePath = join(profileDir, "auth-state.json");
-      const saveArgs = ["--cdp", String(port), "state", "save", authStatePath];
-      const saveResult = await runAgentBrowser(saveArgs, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
-      try { child.kill(); } catch { /* best-effort; the login browser is disposable once we've extracted its auth state */ }
+      // Human confirmed login. Bind the STILL-RUNNING login Chrome into the named session
+      // via CDP, WITHOUT navigating (snapshot binds + verifies in one shot; open would
+      // re-navigate away from the authenticated landing page). Keep the browser ALIVE —
+      // it is now the backing browser this session drives from here on.
 
-      if (!saveResult.ok) {
-        return {
-          content: [{
-            type: "text",
-            text: [
-              "Login browser was confirmed by the human, but extracting its authenticated state via `state save` failed. Do not assume the session is usable.",
-              `Command: ${saveResult.command} ${saveResult.args.map((a) => JSON.stringify(a)).join(" ")}`,
-            ].join("\n"),
-          }],
-          details: { ...saveResult, artifactPaths: [] },
-          terminate: true,
-        };
-      }
+      // Defensive: surface multi-tab situations (OAuth popups) without failing.
+      const tabArgs = ["--cdp", String(port), "tab", "list"];
+      const tabResult = await runAgentBrowser(tabArgs, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
 
-      const loadArgs = ["--session", session, "--restore", "--state", authStatePath, "open", url];
-      const result = await runAgentBrowser(loadArgs, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
+      const bindArgs = ["--session", session, "--cdp", String(port), "snapshot"];
+      const result = await runAgentBrowser(bindArgs, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
 
       if (!result.ok) {
+        // Bind failed: the login browser is still alive but unusable by the session.
+        // Best-effort kill so we don't leak a debug-port Chrome, and report.
+        killPidBestEffort(child.pid);
         return {
           content: [{
             type: "text",
             text: [
-              "Login state was captured from the human's browser, but loading it into a fresh agent-browser session failed. Do not assume the session is usable.",
+              "Human confirmed login, but attaching the live browser to the agent-browser session failed. Do not assume the session is usable.",
               `Command: ${result.command} ${result.args.map((a) => JSON.stringify(a)).join(" ")}`,
             ].join("\n"),
           }],
@@ -933,16 +948,25 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
         };
       }
 
-      await writeSessionState(ctx.cwd, session, { headed: false, lastUrl: url });
+      // Persist backing-browser identity + the fact that a VISIBLE window exists (headed:true).
+      await writeSessionState(ctx.cwd, session, {
+        headed: true,
+        lastUrl: url,
+        loginBrowserPid: child.pid,
+        loginDebugPort: port,
+      });
 
+      const multiTab = /\bt2\b/.test(tabResult.stdout) || (tabResult.stdout.match(/\[t\d+\]/g)?.length ?? 0) > 1;
       return {
         content: [{
           type: "text",
           text: [
-            "Login handoff complete: the human's authenticated cookies/storage were captured and loaded into a fresh agent-browser session.",
+            "Login handoff complete: the browser you signed in with is now live-attached to the agent-browser session and stays open.",
             `Session: ${session === DEFAULT_SESSION_KEY ? "(default)" : session}`,
-            "Take a fresh agent_browser_snapshot before continuing.",
-          ].join("\n"),
+            multiTab ? `Note: multiple tabs are open — verify the active tab before acting:\n${tabResult.stdout.trim()}` : undefined,
+            "The session drives this real browser window directly. Take a fresh agent_browser_snapshot before continuing.",
+            "This login browser has an open remote-debugging port and will stay open until agent_browser_close is called for this session (or the window is closed manually).",
+          ].filter(Boolean).join("\n"),
         }],
         details: { ...result, artifactPaths: [] },
         terminate: true,

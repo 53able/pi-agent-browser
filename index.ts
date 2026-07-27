@@ -965,6 +965,18 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
         loginDebugPort: port,
       });
 
+      // Surface other still-live login browsers so they don't go unnoticed between
+      // agent_browser_doctor runs (same isPidAlive/cleanup semantics as doctor).
+      const otherLiveBrowsers: { session: string; pid: number }[] = [];
+      for (const [otherSession, otherState] of Object.entries(await readSessionStates(ctx.cwd))) {
+        if (otherSession === session || !otherState.loginBrowserPid) continue;
+        if (!isPidAlive(otherState.loginBrowserPid)) {
+          await writeSessionState(ctx.cwd, otherSession, { clearLoginBrowserPid: true });
+          continue;
+        }
+        otherLiveBrowsers.push({ session: otherSession === DEFAULT_SESSION_KEY ? "(default)" : otherSession, pid: otherState.loginBrowserPid });
+      }
+
       const multiTab = /\bt2\b/.test(tabResult.stdout) || (tabResult.stdout.match(/\[t\d+\]/g)?.length ?? 0) > 1;
       return {
         content: [{
@@ -975,6 +987,9 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
             multiTab ? `Note: multiple tabs are open — verify the active tab before acting:\n${tabResult.stdout.trim()}` : undefined,
             "The session drives this real browser window directly. Take a fresh agent_browser_snapshot before continuing.",
             "This login browser has an open remote-debugging port and will stay open until agent_browser_close is called for this session (or the window is closed manually).",
+            otherLiveBrowsers.length > 0
+              ? `Also still open: ${otherLiveBrowsers.map((b) => `${b.session} (pid ${b.pid})`).join(", ")}. Call agent_browser_close for each when done, or run agent_browser_doctor for full details.`
+              : undefined,
           ].filter(Boolean).join("\n"),
         }],
         details: { ...result, artifactPaths: [] },

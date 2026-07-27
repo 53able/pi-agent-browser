@@ -181,7 +181,7 @@ agent-browser doctor
 
 Or ask Pi to run `agent_browser_doctor`. This verifies installation, Chrome, daemon, security, providers, network, and launch tests. It also reports any live login-handoff browsers left open and cleans up stale tracking entries.
 
-If you have sessions created with `agent_browser_login_handoff`, `agent_browser_doctor` will report any that still have live login browsers running, showing the session name, process ID, debugging port, and last known URL. Call `agent_browser_close` for each session when done — these hold an open remote-debugging port until closed. Stale entries (tracking data for processes no longer running) are cleaned up automatically with no notification.
+If you have sessions created with `agent_browser_login_handoff`, `agent_browser_doctor` will report any that still have live login browsers running, showing the session name, process ID, debugging port, and last known URL. Call `agent_browser_close` for each session when done — these hold an open remote-debugging port until closed. Stale entries (tracking data for processes no longer running) are cleaned up automatically with no notification. `agent_browser_login_handoff` itself also names any *other* sessions still running a live login browser in its success message, so you notice without a separate `agent_browser_doctor` call.
 
 Common fixes:
 

@@ -66,6 +66,8 @@ After the human confirms login is complete, subsequent `agent_browser_open`, `ag
 
 Run `agent_browser_doctor` to see which sessions still have live login browsers open. It reports any that are still running (session name, process ID, debugging port, and last known URL) with a reminder to call `agent_browser_close`. Stale tracking entries for processes no longer running are cleaned up silently with no user notification.
 
+`agent_browser_login_handoff` also surfaces this automatically: its success message names any *other* sessions that still have a live login browser open (session name and process ID), so you don't have to run `agent_browser_doctor` separately just to notice one was left open.
+
 Re-running `agent_browser_login_handoff` for the same session name will terminate any previous live login browser for that session before spawning a new one.
 
 ## Common examples

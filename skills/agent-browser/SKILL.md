@@ -36,6 +36,8 @@ Two tools exist so the agent stops and hands control back to a human instead of 
 
 `agent_browser_read` and `agent_browser_snapshot` also run a lightweight heuristic scan for 2FA/CAPTCHA/identity-verification keywords and prepend a warning to their output when detected — treat that warning as a signal to call `agent_browser_handoff` next, not as a blocker by itself.
 
+On resume, `agent_browser_handoff` does not force the agent to stop and wait for a new user turn — the checkpoint is cleared, so continue the original task right away (after a fresh `agent_browser_snapshot`). Only abort ends the turn, since that's a genuine dead end needing a human/operator decision.
+
 ### If the human can't find the browser window
 
 `agent_browser_open` records whether each named session was launched with `headed: true`. When `agent_browser_handoff` runs for a session that was not opened headed, it automatically prepends a warning naming the session and the exact `agent_browser_open` arguments (including the last known URL) needed to reopen it visibly, instead of leaving the human to guess. Prefer `headed: true` from the start for any task that might hit a login, 2FA, CAPTCHA, or identity-verification step — a human can only intervene through `agent_browser_handoff` if a visible window already exists. Note that some verification challenges are single-use or session-bound, so reopening may require restarting the login flow rather than resuming mid-challenge.
@@ -64,11 +66,15 @@ After the human confirms login is complete, subsequent `agent_browser_open`, `ag
 
 **Security note:** The login browser's `--remote-debugging-port` remains open on localhost for as long as the session is alive. This gives any local process full browser control — the same caveat agent-browser's own docs give about `--remote-debugging-port`. Call `agent_browser_close` when done with a session that went through login handoff, rather than leaving it open indefinitely. `agent_browser_close` will terminate the tracked login Chrome process and clean up its debugging port.
 
+Agents should call `agent_browser_close` for the session as soon as the current task no longer needs it (no further browser-driven steps planned) — don't wait for the user to ask. Only leave it open when the task explicitly spans multiple steps or turns that will keep reusing the same session.
+
 Run `agent_browser_doctor` to see which sessions still have live login browsers open. It reports any that are still running (session name, process ID, debugging port, and last known URL) with a reminder to call `agent_browser_close`. Stale tracking entries for processes no longer running are cleaned up silently with no user notification.
 
 `agent_browser_login_handoff` also surfaces this automatically: its success message names any *other* sessions that still have a live login browser open (session name and process ID), so you don't have to run `agent_browser_doctor` separately just to notice one was left open.
 
 Re-running `agent_browser_login_handoff` for the same session name will terminate any previous live login browser for that session before spawning a new one.
+
+On a successful login, the tool does not force the agent to stop and wait for a new user turn — the session is immediately usable, so continue the original task right away (after a fresh `agent_browser_snapshot`). Only the failure/abort/no-UI paths end the turn, since those genuinely need a human or operator decision before anything else can happen.
 
 ## Common examples
 

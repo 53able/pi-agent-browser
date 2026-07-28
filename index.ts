@@ -790,7 +790,9 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
           ].filter(Boolean).join("\n"),
         }],
         details: { ok: resumed, command: "handoff", args: [category], stdout: choice ?? "", stderr: "", exitCode: resumed ? 0 : 1, signal: null, durationMs: 0, artifactPaths: artifacts },
-        terminate: true,
+        // Only force a stop-and-wait turn on abort -- a genuine dead end needing a human/
+        // operator decision. On resume the checkpoint is cleared, so continue immediately.
+        ...(resumed ? {} : { terminate: true }),
       };
     },
   });
@@ -804,7 +806,8 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
       "Never attempt an interactive Google/OAuth-style login via agent_browser_open, agent_browser_click, or agent_browser_fill — those attach CDP immediately, and Google blocks sign-in for CDP-attached sessions regardless of profile or cookies.",
       "Call this tool instead whenever a task is expected to require signing into a Google account or a similarly automation-hostile login flow.",
       "After this tool reports success, take a fresh agent_browser_snapshot before continuing — do not assume page state.",
-      "On success the login browser stays open and IS the session's live backing browser; drive it with the normal agent_browser_* tools by session name, and call agent_browser_close when done to shut it down (it holds an open remote-debugging port until then).",
+      "On success the login browser stays open and IS the session's live backing browser; drive it with the normal agent_browser_* tools by session name.",
+      "Once the current task no longer needs this session (no further browser-driven steps planned), call agent_browser_close for it before finishing — it holds an open remote-debugging port on localhost until closed, and leaving it open is a real, unnecessary security exposure. Only skip closing it when the user's task explicitly spans multiple steps/turns that will keep reusing this same session.",
       "If this tool reports no interactive UI, a decline, or a failure, stop the task and report back; do not retry via agent_browser_open.",
     ],
     parameters: LoginHandoffSchema,
@@ -993,7 +996,9 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
           ].filter(Boolean).join("\n"),
         }],
         details: { ...result, artifactPaths: [] },
-        terminate: true,
+        // No terminate:true here (unlike the failure/abort/no-UI paths above): login
+        // succeeded and the session is immediately usable, so the agent should continue
+        // the original task right away instead of forcing a stop-and-wait-for-the-user turn.
       };
     },
   });

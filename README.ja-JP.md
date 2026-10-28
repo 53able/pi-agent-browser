@@ -18,7 +18,7 @@ Pi が Web ページを開き、rendered context を抽出し、ログイン状�
 ## Requirements
 
 - package support 付きの Pi / Feynman runtime
-- [`agent-browser`](https://github.com/vercel-labs/agent-browser) が `PATH` 上にあること
+- [`agent-browser`](https://github.com/vercel-labs/agent-browser) 0.40.0 以降が `PATH` 上にあること
 - `agent-browser install` で Chrome for Testing が入っていること
 
 確認:

@@ -18,7 +18,7 @@ Use this package when Pi needs to operate real web pages, extract rendered conte
 ## Requirements
 
 - Pi / Feynman runtime with package support
-- [`agent-browser`](https://github.com/vercel-labs/agent-browser) installed and available on `PATH`
+- [`agent-browser`](https://github.com/vercel-labs/agent-browser) 0.40.0 or later installed and available on `PATH`
 - Chrome for Testing installed through `agent-browser install`
 
 Check your local setup:

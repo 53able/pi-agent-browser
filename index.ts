@@ -9,6 +9,7 @@ import { createServer } from "node:net";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_PREVIEW_CHARS = 12_000;
 const DEFAULT_ARTIFACT_DIR = "outputs/browser";
+const MIN_AGENT_BROWSER_VERSION = [0, 40, 0];
 
 // Heuristics for content that signals a human-only checkpoint (2FA, CAPTCHA, identity
 // verification). These are advisory only — read/snapshot stay non-destructive, so we
@@ -232,7 +233,6 @@ const DoctorSchema = Type.Object({
 async function findAgentBrowserBin(): Promise<string> {
   if (process.env.AGENT_BROWSER_BIN) return process.env.AGENT_BROWSER_BIN;
   const candidates = [
-    "/Users/tadano-go/.local/bin/agent-browser",
     join(process.env.HOME ?? "", ".local/bin/agent-browser"),
     "agent-browser",
   ];
@@ -652,6 +652,7 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
     promptGuidelines: [
       "Use operation=list before destructive clear/clean operations unless the user explicitly asks to clear everything.",
       "Use session + restore on agent_browser_open for automatic state persistence; use state save/load for explicit files.",
+      "state load / restore only writes storage while the page is on the saved origin; origins that redirect elsewhere are skipped and listed in the output. Open the target origin first if its storage must apply.",
       "Do not clear all saved states unless the user clearly asks for global cleanup.",
     ],
     parameters: StateSchema,
@@ -940,7 +941,7 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
       const tabArgs = ["--cdp", String(port), "tab", "list"];
       const tabResult = await runAgentBrowser(tabArgs, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
 
-      const bindArgs = ["--session", session, "--cdp", String(port), "snapshot"];
+      const bindArgs = ["--session", session, "--cdp", String(port), "--pin-tab", "snapshot"];
       const result = await runAgentBrowser(bindArgs, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
 
       if (!result.ok) {
@@ -1090,6 +1091,15 @@ export default function agentBrowserExtension(pi: ExtensionAPI) {
       if (params.fix === true) args.push("--fix");
       const result = await runAgentBrowser(args, { signal, timeoutMs: params.timeoutMs as number | undefined, cwd: ctx.cwd, onUpdate });
       const textResult = buildTextResult(result);
+
+      const versionResult = await runAgentBrowser(["--version"], { signal, cwd: ctx.cwd });
+      const version = versionResult.stdout.match(/(\d+)\.(\d+)\.(\d+)/)?.slice(1).map(Number);
+      if (version) {
+        const diff = version.map((n, i) => n - MIN_AGENT_BROWSER_VERSION[i]).find((d) => d !== 0) ?? 0;
+        if (diff < 0) {
+          textResult.content[0].text += `\nagent-browser ${version.join(".")} is older than ${MIN_AGENT_BROWSER_VERSION.join(".")}, the minimum supported version. Run \`npm install -g agent-browser@latest\`.`;
+        }
+      }
 
       const states = await readSessionStates(ctx.cwd);
       const liveBrowsers: { session: string; pid: number; port: number | undefined; lastUrl?: string }[] = [];

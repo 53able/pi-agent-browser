@@ -25,6 +25,7 @@ Use the `agent_browser_*` tools instead of raw `bash` commands when browser stat
 - Prefer `agent_browser_read` over screenshots for textual evidence.
 - Use `agent_browser_eval` only when read/snapshot cannot expose the required state.
 - To keep login state automatically, open with a stable `session` and `restore: true`.
+- State load/restore only writes storage while the page is on the saved origin; origins that redirect elsewhere are skipped and listed. Open the target origin first if its storage must apply.
 - Before clearing state, list saved states with `agent_browser_state` unless the user explicitly asks for broad cleanup.
 
 ## Human handoff and commit gates
@@ -62,7 +63,7 @@ Example call:
 }
 ```
 
-After the human confirms login is complete, subsequent `agent_browser_open`, `agent_browser_snapshot`, `agent_browser_click`, and other calls with the same `session` name will reuse the authenticated browser and operate normally. **The login browser window remains visible and open indefinitely** — this is a real, user-visible Chrome window with an open remote-debugging port on `127.0.0.1` that any local process can access. The session is recorded as `headed: true` (since the authenticated browser is still running).
+After the human confirms login is complete, subsequent `agent_browser_open`, `agent_browser_snapshot`, `agent_browser_click`, and other calls with the same `session` name will reuse the authenticated browser and operate normally. **The login browser window remains visible and open indefinitely** — this is a real, user-visible Chrome window with an open remote-debugging port on `127.0.0.1` that any local process can access. The session is recorded as `headed: true` (since the authenticated browser is still running). The session is pinned to the login tab: if that tab is closed, later calls fail with `tab_gone` instead of silently driving another tab — re-run `agent_browser_login_handoff` to recover.
 
 **Security note:** The login browser's `--remote-debugging-port` remains open on localhost for as long as the session is alive. This gives any local process full browser control — the same caveat agent-browser's own docs give about `--remote-debugging-port`. Call `agent_browser_close` when done with a session that went through login handoff, rather than leaving it open indefinitely. `agent_browser_close` will terminate the tracked login Chrome process and clean up its debugging port.
 
